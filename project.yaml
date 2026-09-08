@@ -1,0 +1,53 @@
+schema_version: 1
+profile: library
+name: honcho-console
+description: Local-only web console for browsing and curating Honcho memory.
+
+documents:
+  agents:
+    path: AGENTS.md
+    authority: operational
+  readme:
+    path: README.md
+    authority: informational
+  requirements:
+    path: docs/REQUIREMENTS.md
+    authority: normative
+    id_prefix: REQ
+  boundaries:
+    path: docs/BOUNDARIES.md
+    authority: normative
+    id_prefix: BOUNDARY
+  testing:
+    path: docs/TESTING.md
+    authority: descriptive
+  todo:
+    path: TODO.md
+    authority: generated
+    source: local
+
+commands:
+  bootstrap: npm install
+  check: npm run check
+  test: npm test
+  validate: npm run validate
+  project-check: python3 .agents/projectctl/validate.py . --profile library
+
+plan_required:
+  paths:
+    - src/lib/honcho-config.ts
+    - src/lib/honcho-client.ts
+    - src/app/api/**
+  change_types:
+    - public-api-change
+    - authentication-change
+    - authorization-change
+    - new-external-dependency
+    - remote-deployment
+    - bulk-data-mutation
+
+protected_control_plane:
+  - AGENTS.md
+  - project.yaml
+  - docs/BOUNDARIES.md
+  - .agents/**

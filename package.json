@@ -1,0 +1,40 @@
+{
+  "name": "honcho-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local-only web console for browsing and curating Honcho memory.",
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run lint && npm run typecheck && npm run test",
+    "validate": "npm run check && npm run build",
+    "project-check": "python3 .agents/projectctl/validate.py . --profile library",
+    "smoke": "node scripts/live-smoke.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "1.41.0",
+    "next": "16.3.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "server-only": "0.0.1",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "26.4.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.4",
+    "jsdom": "29.1.1",
+    "typescript": "6.0.3",
+    "vitest": "5.0.0"
+  }
+}

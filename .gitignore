@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Tests
+coverage/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# macOS and editors
+.DS_Store
+.vscode/
+.idea/
+
+# TypeScript
+tsconfig.tsbuildinfo

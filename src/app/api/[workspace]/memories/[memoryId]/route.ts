@@ -4,6 +4,7 @@ import { z } from "zod";
 import { parseResourceId, parseWorkspaceId } from "@/lib/honcho-client";
 import { replaceConclusion } from "@/lib/conclusion-mutations";
 import { getHonchoClient } from "@/lib/server";
+import { recordChange } from "@/lib/change-journal";
 
 const replaceSchema = z.object({
   content: z.string().trim().min(1).max(65_535),
@@ -31,6 +32,16 @@ export async function DELETE(
     const memoryId = parseResourceId(params.memoryId, "memory");
     const { client } = await getHonchoClient();
     await client.deleteConclusion(workspace, memoryId);
+    try {
+      await recordChange({
+        action: "delete",
+        workspace,
+        summary: `Deleted conclusion ${memoryId}`,
+        id: memoryId,
+      });
+    } catch {
+      // Journaling is best-effort.
+    }
     return new NextResponse(null, { status: 204 });
   } catch (error) {
     const status = error instanceof Error && /Invalid (memory|workspace)/.test(error.message) ? 400 : 502;
@@ -60,6 +71,19 @@ export async function PUT(
       create: (createInput) => client.createConclusion(workspace, createInput),
       remove: (id) => client.deleteConclusion(workspace, id),
     });
+    try {
+      await recordChange({
+        action: "replace",
+        workspace,
+        summary: `Replaced conclusion ${input.original.id} with ${replacement.id}`,
+        id: replacement.id,
+        peer: input.observer_id,
+        before: input.original.content,
+        after: replacement.content,
+      });
+    } catch {
+      // Journaling is best-effort.
+    }
     return NextResponse.json(replacement);
   } catch (error) {
     const isValidationError = error instanceof z.ZodError

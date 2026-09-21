@@ -6,16 +6,20 @@ import {
   Archive,
   ArrowLeft,
   ArrowRight,
+  BarChart3,
   BrainCircuit,
   Check,
   ChevronDown,
   CircleHelp,
   Clock3,
   Database,
+  Download,
   FileText,
   Filter,
+  History,
   LoaderCircle,
   MessageSquareText,
+  MoonStar,
   Network,
   PanelLeft,
   Pencil,
@@ -39,12 +43,20 @@ import type {
   MessagePage,
   Peer,
   PeerContext,
+  QueueStatus,
+  ReasoningLevel,
   Session,
+  SessionSummaries,
 } from "@/lib/honcho-client";
+import type { MemoryStats } from "@/lib/memory-stats";
 import { compactId, formatDate, jsonPreview } from "@/lib/format";
 
-type Section = "overview" | "memories" | "peers" | "sessions";
+type Section = "overview" | "memories" | "peers" | "sessions" | "search";
 type Level = "all" | Conclusion["level"];
+
+// Mirrors REASONING_LEVELS from the server-side Honcho client (client components
+// must not import server-only modules, so the choices are restated here).
+const REASONING_LEVEL_CHOICES: ReasoningLevel[] = ["minimal", "low", "medium", "high", "max"];
 
 type StatusPayload = {
   ok: boolean;
@@ -67,7 +79,7 @@ type WorkspacePayload = {
   conclusions: ConclusionPage;
   queue: { pending_work_units: number; total_work_units: number; completed_work_units: number; in_progress_work_units: number };
 };
-type RecentFilter = { observer_id?: string; observed_id?: string };
+type RecentFilter = { observer_id?: string; observed_id?: string; session_id?: string };
 type PeerOptions = { items: Peer[]; total: number; page: number; size: number; pages: number };
 
 const PEER_OPTION_PAGE_SIZE = 100;
@@ -96,8 +108,27 @@ function sectionTitle(section: Section): string {
     memories: "Memory browser",
     peers: "Peer context",
     sessions: "Session archive",
+    search: "Global search",
   }[section];
 }
+
+type JournalEntry = {
+  at: string;
+  action: string;
+  workspace: string;
+  summary: string;
+  id?: string | null;
+  peer?: string | null;
+  before?: string | null;
+  after?: string | null;
+};
+
+type StatsPayload = {
+  stats: MemoryStats;
+  queue: { pending_work_units: number; in_progress_work_units: number; total_work_units: number; completed_work_units: number };
+};
+
+type SearchHitPayload = { items: Message[]; mode?: string };
 
 function StatCard({
   label,
@@ -185,6 +216,13 @@ export function HonchoDashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sessionFocus, setSessionFocus] = useState({ nonce: 0, sessionId: "" });
+
+  const openSession = useCallback((sessionId: string) => {
+    setSessionFocus((current) => ({ nonce: current.nonce + 1, sessionId }));
+    setActiveSection("sessions");
+    setSidebarOpen(false);
+  }, []);
 
   const workspaceRequestRef = useRef(0);
   const selectedWorkspaceRef = useRef("");
@@ -382,6 +420,7 @@ export function HonchoDashboard() {
           <NavButton section="memories" active={activeSection} onSelect={setActiveSection} icon={<Sparkles size={17} />} label="Memories" count={workspaceData?.conclusions.total} />
           <NavButton section="peers" active={activeSection} onSelect={setActiveSection} icon={<UsersRound size={17} />} label="Peers" count={workspaceData?.peers.total} />
           <NavButton section="sessions" active={activeSection} onSelect={setActiveSection} icon={<MessageSquareText size={17} />} label="Sessions" count={workspaceData?.sessions.total} />
+          <NavButton section="search" active={activeSection} onSelect={setActiveSection} icon={<Search size={17} />} label="Global search" />
         </nav>
 
         <div className="sidebar-footer">
@@ -430,10 +469,11 @@ export function HonchoDashboard() {
           ) : null}
           {workspace && workspaceData ? (
             <>
-              {activeSection === "overview" ? <OverviewView data={workspaceData} activeSessionCount={activeSessionCount} queuePending={queuePending} onNavigate={setActiveSection} /> : null}
-              {activeSection === "memories" ? <MemoriesView key={`${workspace}-${refreshGeneration}`} workspace={workspace} peers={peers} initialItems={recentMemories} initialTotal={workspaceData.conclusions.total} onChanged={() => { if (selectedWorkspaceRef.current === workspace) void loadWorkspace(workspace); }} /> : null}
+              {activeSection === "overview" ? <OverviewView data={workspaceData} workspace={workspace} activeSessionCount={activeSessionCount} queuePending={queuePending} onNavigate={setActiveSection} onOpenSession={openSession} /> : null}
+              {activeSection === "memories" ? <MemoriesView key={`${workspace}-${refreshGeneration}`} workspace={workspace} peers={peers} initialItems={recentMemories} initialTotal={workspaceData.conclusions.total} onChanged={() => { if (selectedWorkspaceRef.current === workspace) void loadWorkspace(workspace); }} onOpenSession={openSession} /> : null}
               {activeSection === "peers" ? <PeersView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.peers} /> : null}
-              {activeSection === "sessions" ? <SessionsView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.sessions} /> : null}
+              {activeSection === "sessions" ? <SessionsView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.sessions} focus={sessionFocus} /> : null}
+              {activeSection === "search" ? <GlobalSearchView workspace={workspace} onOpenSession={openSession} /> : null}
             </>
           ) : null}
           {workspace && loadingWorkspace && !workspaceData ? <LoadingRows count={6} /> : null}
@@ -531,14 +571,18 @@ function WorkspaceEmptyState({ draft, setDraft, onApply }: { draft: string; setD
 
 function OverviewView({
   data,
+  workspace,
   activeSessionCount,
   queuePending,
   onNavigate,
+  onOpenSession,
 }: {
   data: WorkspacePayload;
+  workspace: string;
   activeSessionCount: number;
   queuePending: number;
   onNavigate: (section: Section) => void;
+  onOpenSession: (sessionId: string) => void;
 }) {
   const latest = data.conclusions.items.slice(0, 5);
   return (
@@ -559,6 +603,8 @@ function OverviewView({
         <StatCard label="Sessions" value={data.sessions.total.toLocaleString()} detail={`${activeSessionCount} active on loaded page`} icon={<MessageSquareText size={17} />} accent="blue" />
         <StatCard label="Queue" value={queuePending} detail="Pending work units" icon={<Clock3 size={17} />} accent="amber" />
       </section>
+
+      <MemoryStatsPanel key={workspace} workspace={workspace} onOpenSession={onOpenSession} />
 
       <section className="panel recent-panel">
         <div className="panel-heading">
@@ -584,22 +630,196 @@ function OverviewView({
           </div>
         </section>
       </section>
+
+      <section className="overview-lower-grid">
+        <RecentChangesPanel workspace={workspace} />
+        <ExportPanel workspace={workspace} />
+      </section>
     </div>
   );
 }
 
-function MemoryTable({ items, compact = false, onSelect }: { items: Conclusion[]; compact?: boolean; onSelect: (item: Conclusion) => void }) {
+function MemoryStatsPanel({ workspace, onOpenSession }: { workspace: string; onOpenSession: (sessionId: string) => void }) {
+  const [stats, setStats] = useState<MemoryStats | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requestJson<StatsPayload>(`/api/${encodeURIComponent(workspace)}/stats`, { signal: controller.signal })
+      .then((payload) => { setStats(payload.stats); setError(""); })
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load memory statistics.");
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [workspace]);
+
+  const levelMax = Math.max(1, ...(stats?.byLevel.map((entry) => entry.count) ?? [1]));
+  return (
+    <section className="panel stats-panel">
+      <div className="panel-heading"><div><span className="eyebrow">COMPOSITION</span><h2>Memory composition</h2></div><BarChart3 size={18} aria-hidden="true" /></div>
+      {error ? <ErrorBanner message={error} /> : null}
+      {loading ? <LoadingRows count={2} /> : stats ? (
+        <div className="stats-panel-body">
+          <div className="stats-levels">
+            {stats.byLevel.map((entry) => (
+              <div className="level-bar-row" key={entry.level}>
+                <span className={`level-badge level-${entry.level} level-bar-badge`}>{entry.level}</span>
+                <div className="level-bar"><span style={{ width: `${Math.round((entry.count / levelMax) * 100)}%` }} data-level={entry.level} /></div>
+                <span className="mono">{entry.count.toLocaleString()}</span>
+              </div>
+            ))}
+            {stats.truncated ? <p className="muted stats-note">Analyzed the {stats.analyzed.toLocaleString()} most recent of {stats.totalAvailable.toLocaleString()} conclusions.</p> : <p className="muted stats-note">{stats.analyzed.toLocaleString()} conclusions analyzed.</p>}
+          </div>
+          <div className="stats-spark">
+            <span className="eyebrow">Conclusions · last 30 days</span>
+            <Sparkline points={stats.daily.map((bucket) => bucket.count)} />
+            <div className="stats-toplists">
+              <div>
+                <span className="eyebrow">Top observers</span>
+                {stats.topObservers.slice(0, 3).map((entry) => <span className="mono stat-topline" key={entry.id}>{compactId(entry.id, 16)} · {entry.count}</span>)}
+                {!stats.topObservers.length ? <span className="muted">None</span> : null}
+              </div>
+              <div>
+                <span className="eyebrow">Busiest sessions</span>
+                {stats.topSessions.slice(0, 3).map((entry) => <button className="mono stat-topline session-link" type="button" key={entry.id} onClick={() => onOpenSession(entry.id)}>{compactId(entry.id, 16)} · {entry.count}</button>)}
+                {!stats.topSessions.length ? <span className="muted">None</span> : null}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : !error ? <LoadingRows count={2} /> : null}
+    </section>
+  );
+}
+
+function Sparkline({ points }: { points: number[] }) {
+  const width = 220;
+  const height = 44;
+  const max = Math.max(1, ...points);
+  const step = points.length > 1 ? width / (points.length - 1) : width;
+  const path = points.map((value, index) => `${(index * step).toFixed(1)},${(height - (value / max) * (height - 6) - 3).toFixed(1)}`).join(" ");
+  return (
+    <svg className="sparkline" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Conclusions per day over the last 30 days" preserveAspectRatio="none">
+      <polyline points={path} fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function RecentChangesPanel({ workspace }: { workspace: string }) {
+  const [entries, setEntries] = useState<JournalEntry[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requestJson<{ items: JournalEntry[] }>(`/api/${encodeURIComponent(workspace)}/journal?limit=8`, { signal: controller.signal })
+      .then((payload) => setEntries(payload.items))
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load the change journal.");
+      });
+    return () => controller.abort();
+  }, [workspace]);
+
+  return (
+    <section className="panel compact-panel">
+      <div className="panel-heading"><div><span className="eyebrow">AUDIT TRAIL</span><h2>Recent changes</h2></div><History size={17} aria-hidden="true" /></div>
+      {error ? <ErrorBanner message={error} /> : null}
+      <div className="journal-list">
+        {entries?.length ? entries.map((entry, index) => (
+          <div className="journal-row" key={`${entry.at}-${index}`}>
+            <span className={`journal-action journal-${entry.action.replace(/[^a-z]/g, "")}`}>{entry.action}</span>
+            <div><strong>{entry.summary}</strong><span>{formatDate(entry.at)}</span></div>
+          </div>
+        )) : null}
+        {entries && !entries.length ? <span className="muted journal-empty">No changes recorded yet. Edits made through this console are logged here.</span> : null}
+        {!entries && !error ? <span className="muted journal-empty">Loading journal…</span> : null}
+      </div>
+    </section>
+  );
+}
+
+function ExportPanel({ workspace }: { workspace: string }) {
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+
+  const download = async (format: "json" | "markdown") => {
+    setBusy(format);
+    setError("");
+    try {
+      const response = await fetch(`/api/${encodeURIComponent(workspace)}/export?format=${format}`);
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? `Export failed with HTTP ${response.status}.`);
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition") ?? "";
+      const match = /filename="([^"]+)"/.exec(disposition);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = match?.[1] ?? `honcho-${workspace}-export.${format === "json" ? "json" : "md"}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : "Unable to export memory.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <section className="panel compact-panel">
+      <div className="panel-heading"><div><span className="eyebrow">BACKUP</span><h2>Export</h2></div><Download size={17} aria-hidden="true" /></div>
+      {error ? <ErrorBanner message={error} /> : null}
+      <div className="export-buttons">
+        <p className="panel-help">Download every conclusion and peer card in this workspace before an editing session.</p>
+        <div className="export-row">
+          <button className="button button-secondary" type="button" disabled={busy !== ""} onClick={() => void download("json")}><Download size={14} aria-hidden="true" /> {busy === "json" ? "Preparing…" : "Export JSON"}</button>
+          <button className="button button-secondary" type="button" disabled={busy !== ""} onClick={() => void download("markdown")}><FileText size={14} aria-hidden="true" /> {busy === "markdown" ? "Preparing…" : "Export Markdown"}</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MemoryTable({ items, compact = false, onSelect, onOpenSession }: { items: Conclusion[]; compact?: boolean; onSelect: (item: Conclusion) => void; onOpenSession?: (sessionId: string) => void }) {
+  const interactiveRows = Boolean(onOpenSession) && !compact;
   return (
     <div className={`memory-table ${compact ? "memory-table-compact" : ""}`}>
       <div className="memory-table-head"><span>Memory</span><span>Relationship</span><span>Level</span><span>Created</span></div>
-      {items.map((item) => (
-        <button className="memory-row" type="button" key={item.id} onClick={() => onSelect(item)}>
-          <span className="memory-copy"><strong>{item.content}</strong><small className="mono">{compactId(item.id, 18)}</small></span>
-          <span className="relationship"><span>{compactId(item.observer_id, 13)}</span><ArrowRight size={13} aria-hidden="true" /><span>{compactId(item.observed_id, 13)}</span></span>
-          <span><LevelBadge level={item.level} /></span>
-          <span className="date-cell">{formatDate(item.created_at)}</span>
-        </button>
-      ))}
+      {items.map((item) => {
+        const rowProps = interactiveRows
+          ? {
+              role: "button" as const,
+              tabIndex: 0,
+              "aria-label": `Open memory: ${item.content.slice(0, 80)}`,
+              onKeyDown: (event: React.KeyboardEvent) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelect(item);
+                }
+              },
+            }
+          : {};
+        return (
+          <div
+            className="memory-row"
+            key={item.id}
+            onClick={() => onSelect(item)}
+            {...rowProps}
+          >
+            <span className="memory-copy"><strong>{item.content}</strong><small className="mono">{compactId(item.id, 18)}{!compact && item.session_id && onOpenSession ? <button className="session-link mono" type="button" aria-label={`Open session ${item.session_id}`} onClick={(event) => { event.stopPropagation(); onOpenSession(item.session_id!); }}> · {compactId(item.session_id, 16)}</button> : null}</small></span>
+            <span className="relationship"><span>{compactId(item.observer_id, 13)}</span><ArrowRight size={13} aria-hidden="true" /><span>{compactId(item.observed_id, 13)}</span></span>
+            <span><LevelBadge level={item.level} /></span>
+            <span className="date-cell">{formatDate(item.created_at)}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -608,7 +828,7 @@ function LevelBadge({ level }: { level: Conclusion["level"] }) {
   return <span className={`level-badge level-${level}`}>{level}</span>;
 }
 
-function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged }: { workspace: string; peers: Peer[]; initialItems: Conclusion[]; initialTotal: number; onChanged: () => void }) {
+function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged, onOpenSession }: { workspace: string; peers: Peer[]; initialItems: Conclusion[]; initialTotal: number; onChanged: () => void; onOpenSession: (sessionId: string) => void }) {
   const [pageData, setPageData] = useState<ConclusionPage>({ items: initialItems, total: initialTotal, page: 1, size: initialItems.length || 20, pages: Math.max(1, Math.ceil(initialTotal / (initialItems.length || 20))) });
   const [peerOptions, setPeerOptions] = useState<PeerOptions>(() => ({ items: peers, total: peers.length, page: 1, size: PEER_OPTION_PAGE_SIZE, pages: peers.length ? 1 : 0 }));
   const [peerOptionsError, setPeerOptionsError] = useState("");
@@ -618,6 +838,8 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged 
   const [searchObserved, setSearchObserved] = useState(peers[1]?.id ?? peers[0]?.id ?? "");
   const [browseObserver, setBrowseObserver] = useState("");
   const [browseObserved, setBrowseObserved] = useState("");
+  const [browseSession, setBrowseSession] = useState("");
+  const [sessionDraft, setSessionDraft] = useState("");
   const peerOptionsRequestRef = useRef(0);
 
   useEffect(() => {
@@ -650,7 +872,7 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged 
   const [hasLoaded, setHasLoaded] = useState(false);
   const memoryRequestRef = useRef(0);
 
-  const load = useCallback(async (nextPage: number, nextQuery = query, nextLevel = level, filters: RecentFilter = { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined }) => {
+  const load = useCallback(async (nextPage: number, nextQuery = query, nextLevel = level, filters: RecentFilter = { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }) => {
     const requestId = ++memoryRequestRef.current;
     setLoading(true);
     setError("");
@@ -668,6 +890,7 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged 
       if (!nextQuery.trim()) {
         if (filters.observer_id) params.set("observer_id", filters.observer_id);
         if (filters.observed_id) params.set("observed_id", filters.observed_id);
+        if (filters.session_id) params.set("session_id", filters.session_id);
       }
       const payload = await requestJson<ConclusionPage & { mode?: string }>(`/api/${encodeURIComponent(workspace)}/memories?${params}`);
       if (requestId !== memoryRequestRef.current) return;
@@ -681,7 +904,7 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged 
     } finally {
       if (requestId === memoryRequestRef.current) setLoading(false);
     }
-  }, [browseObserved, browseObserver, level, query, searchObserved, searchObserver, workspace]);
+  }, [browseObserved, browseObserver, browseSession, level, query, searchObserved, searchObserver, workspace]);
 
   useEffect(() => {
     if (hasLoaded) return;
@@ -712,23 +935,25 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged 
             {peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}
           </select>
         </> : <>
-          <select className="select-control search-scope-control" value={browseObserver} onChange={(event) => { setBrowseObserver(event.target.value); void load(1, query, level, { observer_id: event.target.value || undefined, observed_id: browseObserved || undefined }); }} aria-label="Filter recent memories by observer"><option value="">Any observer</option>{peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}</select>
-          <select className="select-control search-scope-control" value={browseObserved} onChange={(event) => { setBrowseObserved(event.target.value); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: event.target.value || undefined }); }} aria-label="Filter recent memories by observed peer"><option value="">Any observed peer</option>{peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}</select>
+          <select className="select-control search-scope-control" value={browseObserver} onChange={(event) => { setBrowseObserver(event.target.value); void load(1, query, level, { observer_id: event.target.value || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }); }} aria-label="Filter recent memories by observer"><option value="">Any observer</option>{peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}</select>
+          <select className="select-control search-scope-control" value={browseObserved} onChange={(event) => { setBrowseObserved(event.target.value); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: event.target.value || undefined, session_id: browseSession || undefined }); }} aria-label="Filter recent memories by observed peer"><option value="">Any observed peer</option>{peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}</select>
+          <input className="text-input session-filter-input" value={sessionDraft} onChange={(event) => setSessionDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setBrowseSession(sessionDraft.trim()); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: sessionDraft.trim() || undefined }); } }} placeholder="session id" aria-label="Filter memories by session ID" />
+          {browseSession ? <button className="button button-quiet" type="button" onClick={() => { setBrowseSession(""); setSessionDraft(""); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined }); }}>Clear session</button> : null}
         </>}
-        <select className="select-control" value={level} onChange={(event) => { const next = event.target.value as Level; setLevel(next); void load(1, query, next, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined }); }} aria-label="Filter by memory level">
+        <select className="select-control" value={level} onChange={(event) => { const next = event.target.value as Level; setLevel(next); void load(1, query, next, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }); }} aria-label="Filter by memory level">
           <option value="all">All levels</option><option value="explicit">Explicit</option><option value="deductive">Deductive</option><option value="inductive">Inductive</option><option value="contradiction">Contradiction</option>
         </select>
-        <button className="button button-secondary" type="button" onClick={() => void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined })}><Search size={15} aria-hidden="true" /> Search</button>
+        <button className="button button-secondary" type="button" onClick={() => void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined })}><Search size={15} aria-hidden="true" /> Search</button>
         <span className="toolbar-note"><Filter size={14} aria-hidden="true" /> {query ? "Semantic results · scoped to relationship" : "Newest first"}</span>
       </section>
-      {error ? <ErrorBanner message={error} onRetry={() => void load(page, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined })} /> : null}
+      {error ? <ErrorBanner message={error} onRetry={() => void load(page, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined })} /> : null}
       <section className={`panel data-panel ${loading ? "panel-loading" : ""}`}>
         <div className="panel-heading"><div><span className="eyebrow">MEMORY LEDGER</span><h2>{query ? "Search results" : "All conclusions"}</h2></div><span className="table-count">{pageData.total.toLocaleString()} records</span></div>
-        {loading ? <LoadingRows count={6} /> : pageData.items.length ? <MemoryTable items={pageData.items} onSelect={handleSelect} /> : <EmptyState icon={<Archive size={21} />} title="No matching memory" body="Try a broader query or remove the active level filter." />}
-        <Pagination page={pageData.page} pages={pageData.pages} onPage={(next) => void load(next, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined })} />
+        {loading ? <LoadingRows count={6} /> : pageData.items.length ? <MemoryTable items={pageData.items} onSelect={handleSelect} onOpenSession={onOpenSession} /> : <EmptyState icon={<Archive size={21} />} title="No matching memory" body="Try a broader query or remove the active level filter." />}
+        <Pagination page={pageData.page} pages={pageData.pages} onPage={(next) => void load(next, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined })} />
       </section>
       {peerOptionsError ? <ErrorBanner message={peerOptionsError} /> : null}
-      {selected || showNew ? <MemoryEditor workspace={workspace} peers={peerOptionItems} selected={selected} onClose={() => { setSelected(null); setShowNew(false); }} onSaved={() => { setSelected(null); setShowNew(false); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined }); onChanged(); }} /> : null}
+      {selected || showNew ? <MemoryEditor workspace={workspace} peers={peerOptionItems} selected={selected} onClose={() => { setSelected(null); setShowNew(false); }} onSaved={() => { setSelected(null); setShowNew(false); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }); onChanged(); }} onOpenSession={onOpenSession} /> : null}
     </div>
   );
 }
@@ -738,7 +963,7 @@ function Pagination({ page, pages, onPage, disabled = false }: { page: number; p
   return <div className="pagination"><button className="icon-button" type="button" disabled={disabled || page <= 1} onClick={() => onPage(page - 1)} aria-label="Previous page"><ArrowLeft size={15} aria-hidden="true" /></button><span>Page <strong>{page}</strong> of <strong>{pages}</strong></span><button className="icon-button" type="button" disabled={disabled || page >= pages} onClick={() => onPage(page + 1)} aria-label="Next page"><ArrowRight size={15} aria-hidden="true" /></button></div>;
 }
 
-function MemoryEditor({ workspace, peers, selected, onClose, onSaved }: { workspace: string; peers: Peer[]; selected: Conclusion | null; onClose: () => void; onSaved: () => void }) {
+function MemoryEditor({ workspace, peers, selected, onClose, onSaved, onOpenSession }: { workspace: string; peers: Peer[]; selected: Conclusion | null; onClose: () => void; onSaved: () => void; onOpenSession: (sessionId: string) => void }) {
   const [content, setContent] = useState(selected?.content ?? "");
   const [observer, setObserver] = useState(selected?.observer_id ?? peers[0]?.id ?? "");
   const [observed, setObserved] = useState(selected?.observed_id ?? peers[1]?.id ?? peers[0]?.id ?? "");
@@ -795,7 +1020,20 @@ function MemoryEditor({ workspace, peers, selected, onClose, onSaved }: { worksp
         </div>
         <label className="field-label" htmlFor="memory-session">Session ID <span className="optional-label">optional</span></label>
         <input id="memory-session" className="text-input" value={sessionId} onChange={(event) => setSessionId(event.target.value)} placeholder="Attach to a session (optional)" />
+        {selected ? (
+          <div className="diff-panel" aria-label="Replacement preview">
+            <div className="diff-col">
+              <span className="eyebrow">Original</span>
+              <div className="diff-old">{selected.content}</div>
+            </div>
+            <div className="diff-col">
+              <span className="eyebrow">Replacement</span>
+              <div className="diff-new">{content || <span className="muted">Empty</span>}</div>
+            </div>
+          </div>
+        ) : null}
         {selected ? <div className="record-meta"><span><span className="eyebrow">RECORD ID</span><code>{selected.id}</code></span><span><span className="eyebrow">LEVEL</span><LevelBadge level={selected.level} /></span></div> : null}
+        {selected?.session_id ? <button className="button button-secondary session-open" type="button" onClick={() => onOpenSession(selected.session_id!)}><MessageSquareText size={14} aria-hidden="true" /> Open session {compactId(selected.session_id, 18)}</button> : null}
         <div className="drawer-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button>{selected ? <button className="button button-danger-ghost" type="button" onClick={() => void remove()} disabled={saving}><Trash2 size={15} aria-hidden="true" /> Delete</button> : null}<button className="button button-primary" type="button" onClick={() => void save()} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}{isEditing ? "Replace memory" : "Create memory"}</button></div>
         <p className="drawer-footnote"><ShieldCheck size={14} aria-hidden="true" /> Destructive actions require confirmation. Replacement is create-first, delete-second.</p>
       </aside>
@@ -928,7 +1166,11 @@ function PeersView({ workspace, initialPage }: { workspace: string; initialPage:
           {loading && !context ? <LoadingRows count={4} /> : null}
           {context ? <>
             <section className="panel representation-panel"><div className="panel-heading"><div><span className="eyebrow">GENERATED VIEW</span><h2>Representation</h2></div><BrainCircuit size={19} aria-hidden="true" /></div><div className="representation-copy">{context.representation ? context.representation.split("\n").map((line, index) => <p key={`${index}-${line}`}>{line || "\u00a0"}</p>) : <span className="muted">No representation returned for this relationship.</span>}</div></section>
+            <DialecticPanel workspace={workspace} observer={observer} target={target} />
+            <RepresentationInspector workspace={workspace} observer={observer} target={target} />
             <section className="panel card-editor-panel"><div className="panel-heading"><div><span className="eyebrow">CURATED FACTS</span><h2>Peer card</h2></div><Pencil size={18} aria-hidden="true" /></div><p className="panel-help">One fact per line. This is the editable, human-curated layer.</p><textarea className="card-textarea" value={cardDraft} onChange={(event) => setCardDraft(event.target.value)} placeholder="No peer card facts yet…" aria-label="Peer card facts" /><div className="card-editor-footer"><span className="mono">{cardDraft.split("\n").filter((line) => line.trim()).length} facts</span><button className="button button-primary" type="button" onClick={() => void saveCard()} disabled={saving}>{saving ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <Check size={15} aria-hidden="true" />} Save peer card</button></div></section>
+            <DreamPanel workspace={workspace} observer={observer} target={target} />
+            <PeerMessageSearch workspace={workspace} peerId={observer} />
           </> : null}
         </div>
       </section>
@@ -939,8 +1181,9 @@ function PeersView({ workspace, initialPage }: { workspace: string; initialPage:
   );
 }
 
-function SessionsView({ workspace, initialPage }: { workspace: string; initialPage: SessionPagePayload }) {
+function SessionsView({ workspace, initialPage, focus }: { workspace: string; initialPage: SessionPagePayload; focus: { nonce: number; sessionId: string } }) {
   const sessions = initialPage.items;
+  const { nonce: focusNonce, sessionId: focusSessionId } = focus;
   const [selected, setSelected] = useState<Session | null>(null);
   const [messages, setMessages] = useState<MessagePage | null>(null);
   const [messagePage, setMessagePage] = useState(1);
@@ -952,6 +1195,7 @@ function SessionsView({ workspace, initialPage }: { workspace: string; initialPa
   const [requestedPage, setRequestedPage] = useState(1);
   const sessionPageRequestRef = useRef(0);
   const messageRequestRef = useRef(0);
+  const focusHandledRef = useRef("");
 
   const loadSessionsPage = async (nextPage: number) => {
     const requestId = ++sessionPageRequestRef.current;
@@ -991,18 +1235,32 @@ function SessionsView({ workspace, initialPage }: { workspace: string; initialPa
   }, [workspace]);
 
   useEffect(() => {
-    if (sessions[0] && !selected) {
-      const timer = window.setTimeout(() => void loadMessages(sessions[0]), 0);
-      return () => window.clearTimeout(timer);
-    }
-  }, [loadMessages, selected, sessions]);
+    if (focusSessionId || !sessions[0] || selected) return;
+    const timer = window.setTimeout(() => void loadMessages(sessions[0]), 0);
+    return () => window.clearTimeout(timer);
+  }, [focusSessionId, loadMessages, selected, sessions]);
+
+  useEffect(() => {
+    if (!focusSessionId) return;
+    const existing = sessionPageData.items.find((session) => session.id === focusSessionId);
+    const session: Session = existing ?? {
+      id: focusSessionId,
+      is_active: false,
+      workspace_id: workspace,
+      metadata: {},
+      configuration: {},
+      created_at: "",
+    };
+    const timer = window.setTimeout(() => void loadMessages(session), 0);
+    return () => window.clearTimeout(timer);
+  }, [focusNonce, focusSessionId, loadMessages, sessionPageData.items, workspace]);
 
   return (
     <div className="page-grid">
       <section className="section-intro"><div><span className="eyebrow">SESSIONS / {sessionPageData.total.toLocaleString()} TOTAL</span><h2>Session archive</h2><p>Inspect conversation history without mutating messages.</p></div><div className="context-pill"><Archive size={15} aria-hidden="true" /> Immutable history view</div></section>
       <section className="session-layout">
         <div className="panel session-list-panel"><div className="panel-heading"><div><span className="eyebrow">RECENT SESSIONS</span><h2>{sessionPageData.total.toLocaleString()} total</h2></div><MessageSquareText size={18} aria-hidden="true" /></div>{sessionPageError ? <ErrorBanner message={sessionPageError} onRetry={() => void loadSessionsPage(requestedPage)} /> : null}<div className="session-list">{sessionPageData.items.map((session) => <button className={`session-list-row ${selected?.id === session.id ? "session-selected" : ""}`} type="button" key={session.id} onClick={() => void loadMessages(session)}><span className={`session-pip ${session.is_active ? "session-live" : ""}`} /><span className="session-list-copy"><strong>{compactId(session.id, 26)}</strong><small>{formatDate(session.created_at)}</small></span><span className="mono">{session.is_active ? "LIVE" : "CLOSED"}</span></button>)}{!sessionPageData.items.length ? <EmptyState icon={<MessageSquareText size={20} />} title="No sessions" body="No sessions were returned for this workspace." /> : null}</div><Pagination page={sessionPageData.page} pages={sessionPageData.pages} disabled={sessionPageLoading} onPage={(next) => void loadSessionsPage(next)} /></div>
-        <div className="panel messages-panel"><div className="panel-heading"><div><span className="eyebrow">MESSAGE STREAM</span><h2>{selected ? compactId(selected.id, 28) : "Select a session"}</h2></div>{selected ? <span className={`state-badge ${selected.is_active ? "state-active" : ""}`}>{selected.is_active ? "Active" : "Closed"}</span> : null}</div>{error ? <ErrorBanner message={error} onRetry={() => { if (selected) void loadMessages(selected, messagePage); }} /> : null}{loading ? <LoadingRows count={5} /> : messages?.items.length ? <><div className="message-stream">{messages.items.map((message) => <MessageRow key={message.id} message={message} />)}</div><Pagination page={messages.page} pages={messages.pages} onPage={(page) => { if (selected) void loadMessages(selected, page); }} /></> : <EmptyState icon={<MessageSquareText size={21} />} title="No messages in view" body={selected ? "This session has no messages on the selected page." : "Choose a session to inspect its message stream."} />}</div>
+        <div className="panel messages-panel"><div className="panel-heading"><div><span className="eyebrow">MESSAGE STREAM</span><h2>{selected ? compactId(selected.id, 28) : "Select a session"}</h2></div>{selected ? <span className={`state-badge ${selected.is_active ? "state-active" : ""}`}>{selected.is_active ? "Active" : "Closed"}</span> : null}</div>{selected ? <SessionSummariesPanel key={selected.id} workspace={workspace} sessionId={selected.id} /> : null}{error ? <ErrorBanner message={error} onRetry={() => { if (selected) void loadMessages(selected, messagePage); }} /> : null}{loading ? <LoadingRows count={5} /> : messages?.items.length ? <><div className="message-stream">{messages.items.map((message) => <MessageRow key={message.id} message={message} />)}</div><Pagination page={messages.page} pages={messages.pages} onPage={(page) => { if (selected) void loadMessages(selected, page); }} /></> : <EmptyState icon={<MessageSquareText size={21} />} title="No messages in view" body={selected ? "This session has no messages on the selected page." : "Choose a session to inspect its message stream."} />}</div>
       </section>
     </div>
   );
@@ -1010,4 +1268,335 @@ function SessionsView({ workspace, initialPage }: { workspace: string; initialPa
 
 function MessageRow({ message }: { message: Message }) {
   return <article className="message-row"><div className="message-avatar">{message.peer_id.slice(0, 1).toUpperCase()}</div><div className="message-body"><div className="message-meta"><strong>{message.peer_id}</strong><span>{formatDate(message.created_at)}</span><span className="mono">{message.token_count} tok</span></div><p>{message.content}</p></div></article>;
+}
+
+function DialecticPanel({ workspace, observer, target }: { workspace: string; observer: string; target: string }) {
+  const [query, setQuery] = useState("");
+  const [reasoningLevel, setReasoningLevel] = useState<ReasoningLevel>("low");
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const ask = async () => {
+    if (!query.trim()) return;
+    const requestId = ++DialecticPanel.requestCounter;
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await requestJson<{ content: string | null }>(`/api/${encodeURIComponent(workspace)}/peers/${encodeURIComponent(observer)}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          query: query.trim(),
+          reasoning_level: reasoningLevel,
+          ...(target ? { target } : {}),
+        }),
+      });
+      setAnswer(payload.content ?? "(empty response)");
+      setQuery("");
+    } catch (askError) {
+      setError(askError instanceof Error ? askError.message : "Unable to complete the dialectic request.");
+    } finally {
+      if (requestId === DialecticPanel.requestCounter) setLoading(false);
+    }
+  };
+
+  return (
+    <section className="panel dialectic-panel">
+      <div className="panel-heading"><div><span className="eyebrow">DIALECTIC API</span><h2>Ask this peer</h2></div><Sparkles size={18} aria-hidden="true" /></div>
+      <p className="panel-help">Queries Honcho&apos;s dialectic API against the {target ? `${observer} → ${target}` : observer} representation. Answers come from the configured LLM provider and cost tokens.</p>
+      {error ? <ErrorBanner message={error} /> : null}
+      <textarea
+        className="chat-input"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="What does this peer believe about…?"
+        aria-label="Question for this peer"
+      />
+      <div className="chat-controls">
+        <select className="select-control" value={reasoningLevel} onChange={(event) => setReasoningLevel(event.target.value as ReasoningLevel)} aria-label="Dialectic reasoning level">
+          {REASONING_LEVEL_CHOICES.map((level) => <option key={level} value={level}>{level}</option>)}
+        </select>
+        <button className="button button-primary" type="button" onClick={() => void ask()} disabled={loading || !query.trim()}>
+          {loading ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <Sparkles size={15} aria-hidden="true" />} Ask
+        </button>
+      </div>
+      {answer !== null ? (
+        <div className="chat-response" aria-live="polite">
+          <span className="eyebrow">Answer</span>
+          <p>{answer}</p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+DialecticPanel.requestCounter = 0;
+
+function RepresentationInspector({ workspace, observer, target }: { workspace: string; observer: string; target: string }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [topK, setTopK] = useState("25");
+  const [maxConclusions, setMaxConclusions] = useState("25");
+  const [includeMostFrequent, setIncludeMostFrequent] = useState(false);
+  const [representation, setRepresentation] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const fetchRepresentation = async () => {
+    const requestId = ++RepresentationInspector.requestCounter;
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await requestJson<{ representation: string }>(`/api/${encodeURIComponent(workspace)}/peers/${encodeURIComponent(observer)}/representation`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...(target ? { target } : {}),
+          ...(searchQuery.trim() ? { search_query: searchQuery.trim() } : {}),
+          ...(searchQuery.trim() ? { search_top_k: Number(topK) || undefined } : {}),
+          ...(searchQuery.trim() ? { max_conclusions: Number(maxConclusions) || undefined } : {}),
+          ...(searchQuery.trim() && includeMostFrequent ? { include_most_frequent: true } : {}),
+        }),
+      });
+      setRepresentation(payload.representation);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Unable to build the working representation.");
+    } finally {
+      if (requestId === RepresentationInspector.requestCounter) setLoading(false);
+    }
+  };
+
+  return (
+    <section className="panel inspector-panel">
+      <div className="panel-heading"><div><span className="eyebrow">RETRIEVAL DEBUG</span><h2>Working representation</h2></div><CircleHelp size={18} aria-hidden="true" /></div>
+      <p className="panel-help">Reconstruct what an agent would recall: scope the representation around a semantic query and inspect the selected conclusions.</p>
+      {error ? <ErrorBanner message={error} /> : null}
+      <div className="inspector-form">
+        <input className="text-input" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Optional search query…" aria-label="Representation search query" />
+        <div className="inspector-grid">
+          <label className="field-label">Top K<input className="text-input" type="number" min={1} max={100} value={topK} onChange={(event) => setTopK(event.target.value)} aria-label="Search top K" /></label>
+          <label className="field-label">Max conclusions<input className="text-input" type="number" min={1} max={100} value={maxConclusions} onChange={(event) => setMaxConclusions(event.target.value)} aria-label="Max conclusions" /></label>
+        </div>
+        <label className="inspector-check">
+          <input type="checkbox" checked={includeMostFrequent} onChange={(event) => setIncludeMostFrequent(event.target.checked)} aria-label="Include most frequent conclusions" />
+          Include most frequent conclusions
+        </label>
+        <div className="inspector-actions">
+          <button className="button button-secondary" type="button" onClick={() => void fetchRepresentation()} disabled={loading}>{loading ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />} Fetch representation</button>
+          {representation ? <button className="button button-quiet" type="button" onClick={() => setRepresentation("")}>Clear</button> : null}
+        </div>
+      </div>
+      {representation ? <div className="representation-copy scoped-representation"><span className="eyebrow">Scoped result</span><p>{representation}</p></div> : null}
+    </section>
+  );
+}
+
+RepresentationInspector.requestCounter = 0;
+
+function DreamPanel({ workspace, observer, target }: { workspace: string; observer: string; target: string }) {
+  const [dreamType, setDreamType] = useState<"omni" | "card_refresh">("card_refresh");
+  const [rebuild, setRebuild] = useState(false);
+  const [queue, setQueue] = useState<QueueStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const schedule = async () => {
+    const description = dreamType === "card_refresh"
+      ? `Rebuild ${observer}'s${target ? ` view of ${target}` : " peer card"} with a card_refresh dream?${rebuild ? " The card will be rebuilt solely from observations still in the collection." : ""}`
+      : `Schedule a full omni dream for ${observer}? This re-derives memories and can take a while.`;
+    if (!window.confirm(description)) return;
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await requestJson<{ ok: boolean; queue: QueueStatus }>(`/api/${encodeURIComponent(workspace)}/dreams`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          observer,
+          ...(target ? { observed: target } : {}),
+          dream_type: dreamType,
+          rebuild,
+        }),
+      });
+      setQueue(payload.queue);
+    } catch (dreamError) {
+      setError(dreamError instanceof Error ? dreamError.message : "Unable to schedule the dream.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="panel dream-panel">
+      <div className="panel-heading"><div><span className="eyebrow">DERIVER</span><h2>Dreams</h2></div><MoonStar size={18} aria-hidden="true" /></div>
+      <p className="panel-help">Dreaming triggers Honcho&apos;s deriver to re-deduce memories or refresh the peer card. It runs server-side and consumes deriver capacity.</p>
+      {error ? <ErrorBanner message={error} /> : null}
+      <div className="dream-form">
+        <label className="field-label">Dream type
+          <select className="select-control" value={dreamType} onChange={(event) => setDreamType(event.target.value as "omni" | "card_refresh")} aria-label="Dream type">
+            <option value="card_refresh">card_refresh</option>
+            <option value="omni">omni</option>
+          </select>
+        </label>
+        {dreamType === "card_refresh" ? (
+          <label className="inspector-check">
+            <input type="checkbox" checked={rebuild} onChange={(event) => setRebuild(event.target.checked)} aria-label="Rebuild card from remaining observations" />
+            Rebuild solely from remaining observations (after removals)
+          </label>
+        ) : null}
+        <button className="button button-secondary button-full" type="button" onClick={() => void schedule()} disabled={loading || !observer}>
+          {loading ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <MoonStar size={15} aria-hidden="true" />} Schedule dream
+        </button>
+      </div>
+      {queue ? (
+        <div className="queue-state" aria-live="polite">
+          <span className="eyebrow">Queue after scheduling</span>
+          <span className="mono">pending {queue.pending_work_units} · in progress {queue.in_progress_work_units} · total {queue.total_work_units}</span>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function PeerMessageSearch({ workspace, peerId }: { workspace: string; peerId: string }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Message[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const search = async () => {
+    if (!query.trim()) return;
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await requestJson<SearchHitPayload>(`/api/${encodeURIComponent(workspace)}/peers/${encodeURIComponent(peerId)}/search`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: query.trim(), limit: 20 }),
+      });
+      setResults(payload.items);
+    } catch (searchError) {
+      setError(searchError instanceof Error ? searchError.message : "Unable to search peer messages.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="panel peer-search-panel">
+      <div className="panel-heading"><div><span className="eyebrow">MESSAGE RECALL</span><h2>Search this peer&apos;s messages</h2></div><Search size={17} aria-hidden="true" /></div>
+      {error ? <ErrorBanner message={error} /> : null}
+      <div className="search-control peer-search-control"><Search size={16} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void search(); }} placeholder={`Messages from ${peerId}…`} aria-label="Search this peer's messages" /><button className="button button-secondary" type="button" onClick={() => void search()} disabled={loading}>{loading ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : "Search"}</button></div>
+      {results ? (
+        results.length ? (
+          <div className="search-hits">
+            {results.map((hit) => (
+              <div className="search-hit" key={hit.id}>
+                <div className="message-meta"><strong>{hit.peer_id}</strong><span>{formatDate(hit.created_at)}</span><span className="mono">{compactId(hit.session_id, 18)}</span></div>
+                <p>{hit.content}</p>
+              </div>
+            ))}
+          </div>
+        ) : <span className="muted">No matching messages for this peer.</span>
+      ) : null}
+    </section>
+  );
+}
+
+function SessionSummariesPanel({ workspace, sessionId }: { workspace: string; sessionId: string }) {
+  const [summaries, setSummaries] = useState<SessionSummaries | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requestJson<SessionSummaries>(`/api/${encodeURIComponent(workspace)}/sessions/${encodeURIComponent(sessionId)}/summaries`, { signal: controller.signal })
+      .then((payload) => setSummaries(payload))
+      .catch((loadError) => {
+        if (controller.signal.aborted) return;
+        setError(loadError instanceof Error ? loadError.message : "Unable to load session summaries.");
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [sessionId, workspace]);
+
+  if (loading && !summaries && !error) {
+    return <div className="summaries-panel" aria-label="Loading summaries"><span className="muted">Loading summaries…</span></div>;
+  }
+  if (error) {
+    return <div className="summaries-panel"><ErrorBanner message={error} /></div>;
+  }
+  if (!summaries || (!summaries.short_summary && !summaries.long_summary)) {
+    return <div className="summaries-panel"><span className="muted">No summaries generated for this session yet.</span></div>;
+  }
+  return (
+    <div className="summaries-panel">
+      {summaries.short_summary ? (
+        <details className="summary-block" open>
+          <summary>Short summary <span className="mono">{summaries.short_summary.token_count} tok</span></summary>
+          <p>{summaries.short_summary.content}</p>
+        </details>
+      ) : null}
+      {summaries.long_summary ? (
+        <details className="summary-block">
+          <summary>Long summary <span className="mono">{summaries.long_summary.token_count} tok</span></summary>
+          <p>{summaries.long_summary.content}</p>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function GlobalSearchView({ workspace, onOpenSession }: { workspace: string; onOpenSession: (sessionId: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Message[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const search = async () => {
+    if (!query.trim()) return;
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await requestJson<SearchHitPayload>(`/api/${encodeURIComponent(workspace)}/search`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: query.trim(), limit: 30 }),
+      });
+      setResults(payload.items);
+    } catch (searchError) {
+      setError(searchError instanceof Error ? searchError.message : "Unable to search messages.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="page-grid">
+      <section className="section-intro">
+        <div><span className="eyebrow">MESSAGES / SEMANTIC</span><h2>Global search</h2><p>Search every stored message in this workspace, then jump to the originating session.</p></div>
+        <div className="context-pill"><Search size={15} aria-hidden="true" /> Read-only recall</div>
+      </section>
+      <section className="panel toolbar-panel">
+        <div className="search-control"><Search size={17} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void search(); }} placeholder="Search messages…" aria-label="Search workspace messages" /></div>
+        <button className="button button-secondary" type="button" onClick={() => void search()} disabled={loading || !query.trim()}><Search size={15} aria-hidden="true" /> Search</button>
+      </section>
+      {error ? <ErrorBanner message={error} /> : null}
+      <section className="panel data-panel">
+        <div className="panel-heading"><div><span className="eyebrow">RESULTS</span><h2>{results ? `${results.length} hits` : "Search the archive"}</h2></div><MessageSquareText size={18} aria-hidden="true" /></div>
+        {loading ? <LoadingRows count={5} /> : results ? (
+          results.length ? (
+            <div className="search-hits global">
+              {results.map((hit) => (
+                <div className="search-hit" key={hit.id}>
+                  <div className="message-meta"><strong>{hit.peer_id}</strong><span>{formatDate(hit.created_at)}</span><span className="mono">{compactId(hit.session_id, 18)}</span><button className="text-button" type="button" onClick={() => onOpenSession(hit.session_id)}>Open session</button></div>
+                  <p>{hit.content}</p>
+                </div>
+              ))}
+            </div>
+          ) : <EmptyState icon={<Search size={20} />} title="No matches" body="Try a different query — this searches message content across every session." />
+        ) : <EmptyState icon={<Search size={20} />} title="Nothing searched yet" body="Run a query to find messages across the workspace." />}
+      </section>
+    </div>
+  );
 }

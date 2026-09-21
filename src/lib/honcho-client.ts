@@ -83,6 +83,28 @@ const peerContextSchema = z.object({
   peer_card: z.array(z.string()).nullable().default(null),
 });
 
+const summarySchema = z.object({
+  content: z.string(),
+  message_id: z.string(),
+  summary_type: z.string(),
+  created_at: z.string(),
+  token_count: z.number().int(),
+});
+
+const sessionSummariesSchema = z.object({
+  id: z.string(),
+  short_summary: summarySchema.nullable().default(null),
+  long_summary: summarySchema.nullable().default(null),
+});
+
+const workingRepresentationSchema = z.object({
+  representation: z.string(),
+});
+
+const dialecticResponseSchema = z.object({
+  content: z.string().nullable(),
+});
+
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type Peer = z.infer<typeof peerSchema>;
 export type Session = z.infer<typeof sessionSchema>;
@@ -95,12 +117,20 @@ export type SessionPage = z.infer<typeof sessionPageSchema>;
 export type MessagePage = z.infer<typeof messagePageSchema>;
 export type ConclusionPage = z.infer<typeof conclusionPageSchema>;
 export type QueueStatus = z.infer<typeof queueStatusSchema>;
+export type Summary = z.infer<typeof summarySchema>;
+export type SessionSummaries = z.infer<typeof sessionSummariesSchema>;
 
 export type ConclusionFilters = {
   observer_id?: string;
   observed_id?: string;
+  session_id?: string;
   level?: Conclusion["level"];
 };
+
+export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "max"] as const;
+export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+export type DreamType = "omni" | "card_refresh";
+export const MAX_DIALECTIC_QUERY_LENGTH = 10_000;
 
 export type ConclusionSearchFilters = {
   observer: string;
@@ -368,11 +398,164 @@ export class HonchoClient {
     );
   }
 
+  async chatWithPeer(
+    workspace: string,
+    peerId: string,
+    options: { query: string; target?: string; sessionId?: string; reasoningLevel?: ReasoningLevel },
+  ): Promise<{ content: string | null }> {
+    const query = options.query.trim();
+    if (!query || query.length > MAX_DIALECTIC_QUERY_LENGTH) {
+      throw new Error(`Chat query must be between 1 and ${MAX_DIALECTIC_QUERY_LENGTH.toLocaleString()} characters.`);
+    }
+    const observer = parseResourceId(peerId, "peer");
+    const reasoningLevel = options.reasoningLevel ?? "low";
+    if (!REASONING_LEVELS.includes(reasoningLevel)) {
+      throw new Error(`Unsupported reasoning level: ${String(reasoningLevel)}.`);
+    }
+    const body: Record<string, unknown> = {
+      query,
+      stream: false,
+      reasoning_level: reasoningLevel,
+    };
+    if (options.target !== undefined && options.target !== "") {
+      body.target = parseResourceId(options.target, "target");
+    }
+    if (options.sessionId !== undefined && options.sessionId !== "") {
+      body.session_id = parseResourceId(options.sessionId, "session");
+    }
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/peers/${pathSegment(observer)}/chat`,
+      "POST",
+      body,
+      dialecticResponseSchema,
+      120_000,
+    );
+  }
+
+  async getWorkingRepresentation(
+    workspace: string,
+    peerId: string,
+    options: {
+      target?: string;
+      sessionId?: string;
+      searchQuery?: string;
+      searchTopK?: number;
+      searchMaxDistance?: number;
+      includeMostFrequent?: boolean;
+      maxConclusions?: number;
+    } = {},
+  ): Promise<{ representation: string }> {
+    const observer = parseResourceId(peerId, "peer");
+    const searchTopK = options.searchTopK;
+    if (searchTopK !== undefined && !Number.isFinite(searchTopK)) {
+      throw new Error("search_top_k must be a finite number.");
+    }
+    const maxConclusions = options.maxConclusions;
+    if (maxConclusions !== undefined && !Number.isFinite(maxConclusions)) {
+      throw new Error("max_conclusions must be a finite number.");
+    }
+    const searchMaxDistance = options.searchMaxDistance;
+    if (searchMaxDistance !== undefined && !Number.isFinite(searchMaxDistance)) {
+      throw new Error("search_max_distance must be a finite number.");
+    }
+    const body: Record<string, unknown> = {};
+    if (options.target !== undefined && options.target !== "") {
+      body.target = parseResourceId(options.target, "target");
+    }
+    if (options.sessionId !== undefined && options.sessionId !== "") {
+      body.session_id = parseResourceId(options.sessionId, "session");
+    }
+    if (options.searchQuery !== undefined && options.searchQuery !== "") {
+      body.search_query = options.searchQuery;
+      if (searchTopK !== undefined) body.search_top_k = Math.min(Math.max(Math.trunc(searchTopK), 1), 100);
+      if (maxConclusions !== undefined) body.max_conclusions = Math.min(Math.max(Math.trunc(maxConclusions), 1), 100);
+      if (searchMaxDistance !== undefined) body.search_max_distance = Math.min(Math.max(searchMaxDistance, 0), 1);
+      if (options.includeMostFrequent !== undefined) body.include_most_frequent = options.includeMostFrequent;
+    }
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/peers/${pathSegment(observer)}/representation`,
+      "POST",
+      body,
+      workingRepresentationSchema,
+      60_000,
+    );
+  }
+
+  async listSessionSummaries(workspace: string, sessionId: string): Promise<SessionSummaries> {
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/sessions/${pathSegment(validateSessionId(sessionId))}/summaries`,
+      "GET",
+      undefined,
+      sessionSummariesSchema,
+    );
+  }
+
+  async searchMessages(workspace: string, query: string, limit = 20): Promise<Message[]> {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery || normalizedQuery.length > 500) {
+      throw new Error("Search query must be between 1 and 500 characters.");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Search limit must be between 1 and 100.");
+    }
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/search`,
+      "POST",
+      { query: normalizedQuery, limit },
+      z.array(messageSchema),
+    );
+  }
+
+  async searchPeerMessages(workspace: string, peerId: string, query: string, limit = 20): Promise<Message[]> {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery || normalizedQuery.length > 500) {
+      throw new Error("Search query must be between 1 and 500 characters.");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Search limit must be between 1 and 100.");
+    }
+    const observer = parseResourceId(peerId, "peer");
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/peers/${pathSegment(observer)}/search`,
+      "POST",
+      { query: normalizedQuery, limit },
+      z.array(messageSchema),
+    );
+  }
+
+  async scheduleDream(
+    workspace: string,
+    input: { observer: string; observed?: string; dreamType: DreamType; sessionId?: string; rebuild?: boolean },
+  ): Promise<void> {
+    const observer = parseResourceId(input.observer, "observer");
+    if (input.dreamType !== "omni" && input.dreamType !== "card_refresh") {
+      throw new Error(`Unsupported dream type: ${String(input.dreamType)}.`);
+    }
+    const body: Record<string, unknown> = {
+      observer,
+      dream_type: input.dreamType,
+      rebuild: Boolean(input.rebuild),
+    };
+    if (input.observed !== undefined && input.observed !== "") {
+      body.observed = parseResourceId(input.observed, "observed");
+    }
+    if (input.sessionId !== undefined && input.sessionId !== "") {
+      body.session_id = parseResourceId(input.sessionId, "session");
+    }
+    await this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/schedule_dream`,
+      "POST",
+      body,
+      z.undefined(),
+    );
+  }
+
   private async request<T extends z.ZodType>(
     path: string,
     method: "GET" | "POST" | "PUT" | "DELETE",
     body: unknown,
     schema: T,
+    timeoutMs = 15_000,
   ): Promise<z.infer<T>> {
     const response = await fetch(`${this.#baseUrl}${path}`, {
       method,
@@ -381,7 +564,7 @@ export class HonchoClient {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) {

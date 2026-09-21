@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { parseResourceId, parseWorkspaceId } from "@/lib/honcho-client";
 import { getHonchoClient } from "@/lib/server";
+import { recordChange } from "@/lib/change-journal";
 
 const createSchema = z.object({
   content: z.string().trim().min(1).max(65_535),
@@ -67,11 +68,14 @@ export async function GET(
 
     const observerParam = params.get("observer_id")?.trim() ?? "";
     const observedParam = params.get("observed_id")?.trim() ?? "";
+    const sessionParam = params.get("session_id")?.trim() ?? "";
     let observer: string | undefined;
     let observed: string | undefined;
+    let sessionId: string | undefined;
     try {
       observer = observerParam ? parseResourceId(observerParam, "observer") : undefined;
       observed = observedParam ? parseResourceId(observedParam, "observed") : undefined;
+      sessionId = sessionParam ? parseResourceId(sessionParam, "session") : undefined;
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid memory relationship." }, { status: 400 });
     }
@@ -81,6 +85,7 @@ export async function GET(
       filters: {
         ...(observer ? { observer_id: observer } : {}),
         ...(observed ? { observed_id: observed } : {}),
+        ...(sessionId ? { session_id: sessionId } : {}),
         ...(level ? { level } : {}),
       },
     });
@@ -100,6 +105,18 @@ export async function POST(
     const input = createSchema.parse(await request.json());
     const { client } = await getHonchoClient();
     const created = await client.createConclusion(workspace, input);
+    try {
+      await recordChange({
+        action: "create",
+        workspace,
+        summary: `Created conclusion for ${created.observer_id} → ${created.observed_id}`,
+        id: created.id,
+        peer: created.observer_id,
+        after: created.content,
+      });
+    } catch {
+      // Journaling is best-effort and must never fail the mutation itself.
+    }
     return NextResponse.json(created, { status: 201 });
   } catch (error) {
     const isValidationError = error instanceof z.ZodError || error instanceof SyntaxError;

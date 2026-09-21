@@ -11,6 +11,10 @@ vi.mock("@/lib/server", () => ({
   getHonchoClient: vi.fn(),
 }));
 
+vi.mock("@/lib/change-journal", () => ({
+  recordChange: vi.fn().mockResolvedValue(undefined),
+}));
+
 const mockedGetHonchoClient = vi.mocked(getHonchoClient);
 
 type FakeClient = {

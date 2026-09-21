@@ -36,9 +36,37 @@ const semantic = searchObserver && searchObserved
   ? await get(`/api/${encodeURIComponent(workspace)}/memories?query=science&observer_id=${encodeURIComponent(searchObserver)}&observed_id=${encodeURIComponent(searchObserved)}&size=1`)
   : null;
 
-const serialized = JSON.stringify({ status, overview, memories, peers, sessions, context, messages, semantic }).toLowerCase();
+// Feature additions: read-only routes on live data.
+const stats = await get(`/api/${encodeURIComponent(workspace)}/stats`);
+const journal = await get(`/api/${encodeURIComponent(workspace)}/journal?limit=5`);
+const queue = await get(`/api/${encodeURIComponent(workspace)}/queue`);
+const summaries = await get(`/api/${encodeURIComponent(workspace)}/sessions/${encodeURIComponent(sessionId)}/summaries`);
+const exportResponse = await fetch(`${baseUrl}/api/${encodeURIComponent(workspace)}/export?format=markdown`);
+if (!exportResponse.ok) throw new Error(`export: HTTP ${exportResponse.status}`);
+const exportText = await exportResponse.text();
+if (!exportText.includes("# Honcho export —")) throw new Error("export markdown did not include the header");
+const messageSearchResponse = await fetch(`${baseUrl}/api/${encodeURIComponent(workspace)}/search`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ query: "memory", limit: 3 }),
+});
+if (!messageSearchResponse.ok) throw new Error(`message search: HTTP ${messageSearchResponse.status}`);
+const messageSearch = await messageSearchResponse.json();
+if (messageSearch.mode !== "message-search") throw new Error("message search did not label its mode");
+// Dream scheduling is validated read-only: an invalid dream type must be rejected before any deriver work.
+const invalidDream = await fetch(`${baseUrl}/api/${encodeURIComponent(workspace)}/dreams`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ observer: peerId, dream_type: "not-a-dream" }),
+});
+if (invalidDream.status !== 400) throw new Error(`invalid dream should be rejected with 400, got ${invalidDream.status}`);
+
+const serialized = JSON.stringify({ status, overview, memories, peers, sessions, context, messages, semantic, stats, journal, queue, summaries, messageSearch }).toLowerCase();
 if (semantic && semantic.mode !== "semantic") throw new Error("semantic search did not return semantic mode");
 if (semantic && semantic.size < 1) throw new Error("semantic search returned an invalid page size");
+if (stats.stats.totalAvailable < 0 || stats.queue.pending_work_units < 0) throw new Error("stats payload failed invariant checks");
+if (!Array.isArray(journal.items)) throw new Error("journal did not return an items array");
+if (summaries.id !== sessionId) throw new Error("summaries did not echo the session id");
 
 for (const secretMarker of ["bearer ", "api_key", "apikey", "jwt_secret"]) {
   if (serialized.includes(secretMarker)) throw new Error(`possible credential marker leaked in UI API responses: ${secretMarker}`);
@@ -54,4 +82,7 @@ console.log(JSON.stringify({
   memories: memories.total,
   messages: messages.total,
   peerContext: Boolean(context.peer_id),
+  statsTotal: stats.stats.totalAvailable,
+  messageSearchHits: messageSearch.items.length,
+  exportBytes: exportText.length,
 }));

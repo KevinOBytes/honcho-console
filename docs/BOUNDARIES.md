@@ -60,6 +60,14 @@ These `BOUNDARY-*` statements are hard constraints. Do not weaken one to simplif
 - BOUNDARY-OPS-001: The app does not start, stop, repair, or reconfigure Honcho containers.
 - BOUNDARY-OPS-002: A disconnected app remains read-only except for retrying connection; it must not synthesize mock records that look real.
 - BOUNDARY-OPS-003: Delete and replace actions require an explicit confirmation in the current browser interaction.
+- BOUNDARY-OPS-004: Dialectic chat and representation requests are read-only deriver queries. The console must never send a persistence flag or persist the generated answer, and generated text must always be labeled as a derived view.
+- BOUNDARY-OPS-005: Dream scheduling is the only console-triggered deriver job. It requires an explicit confirmation dialog in the current browser interaction, a server-validated `dream_type` (`omni` or `card_refresh`), and a plainly stated warning that it triggers real server-side derivation work. Any additional dream types or automatic/periodic scheduling require explicit approval.
+- BOUNDARY-OPS-006: Composition statistics and the change journal are analysis features computed server-side from normal reads; they must not introduce new writes to Honcho.
+
+## Local artifacts boundaries
+
+- BOUNDARY-DATA-003: The change journal is an append-only local file under the operator home (`~/.honcho-console/change-journal.jsonl` by default, `HONCHO_CONSOLE_JOURNAL_PATH` override), written with mode 0600, best-effort (a journal failure never blocks or rolls back the mutation), and limited to bounded summaries and truncated before/after content — never full unbounded record dumps, authorization material, or config secrets.
+- BOUNDARY-DATA-004: Exports are generated server-side from live reads and delivered as a browser download attachment; they must never be persisted server-side, uploaded, or emailed anywhere.
 
 ## Actions requiring explicit human approval
 

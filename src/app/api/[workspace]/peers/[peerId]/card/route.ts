@@ -9,6 +9,7 @@ import {
   parseWorkspaceId,
 } from "@/lib/honcho-client";
 import { getHonchoClient } from "@/lib/server";
+import { recordChange } from "@/lib/change-journal";
 
 const cardSchema = z.object({
   facts: z.array(z.string().trim().min(1).max(MAX_PEER_CARD_FACT_LENGTH)).max(MAX_PEER_CARD_FACTS),
@@ -31,6 +32,17 @@ export async function PUT(
     const target = rawTarget === null ? undefined : parseResourceId(rawTarget, "target");
     const { client } = await getHonchoClient();
     const peerCard = await client.setPeerCard(workspace, peerId, input.facts, target);
+    try {
+      await recordChange({
+        action: "card-update",
+        workspace,
+        summary: `Replaced peer card for ${peerId}${target ? ` (target ${target})` : ""} with ${input.facts.length} facts`,
+        peer: peerId,
+        after: input.facts.join("\n"),
+      });
+    } catch {
+      // Journaling is best-effort.
+    }
     return NextResponse.json({ peer_card: peerCard });
   } catch (error) {
     const isValidationError = error instanceof z.ZodError

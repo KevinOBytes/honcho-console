@@ -828,8 +828,16 @@ function LevelBadge({ level }: { level: Conclusion["level"] }) {
   return <span className={`level-badge level-${level}`}>{level}</span>;
 }
 
+function uniqueConclusions(items: Conclusion[], seen = new Set<string>()) {
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
 function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged, onOpenSession }: { workspace: string; peers: Peer[]; initialItems: Conclusion[]; initialTotal: number; onChanged: () => void; onOpenSession: (sessionId: string) => void }) {
-  const [pageData, setPageData] = useState<ConclusionPage>({ items: initialItems, total: initialTotal, page: 1, size: initialItems.length || 20, pages: Math.max(1, Math.ceil(initialTotal / (initialItems.length || 20))) });
+  const [pageData, setPageData] = useState<ConclusionPage & { mode?: "recent" | "semantic" }>({ items: uniqueConclusions(initialItems), total: initialTotal, page: 1, size: initialItems.length || 20, pages: Math.max(1, Math.ceil(initialTotal / (initialItems.length || 20))), mode: "recent" });
   const [peerOptions, setPeerOptions] = useState<PeerOptions>(() => ({ items: peers, total: peers.length, page: 1, size: PEER_OPTION_PAGE_SIZE, pages: peers.length ? 1 : 0 }));
   const [peerOptionsError, setPeerOptionsError] = useState("");
   const peerOptionItems = peerOptions.items.length ? peerOptions.items : peers;
@@ -864,18 +872,46 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
     return () => { peerOptionsRequestRef.current += 1; };
   }, [peers, workspace]);
   const [level, setLevel] = useState<Level>("all");
-  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Conclusion | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [failedAppend, setFailedAppend] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadingAll, setLoadingAll] = useState(false);
+  const [listResetPending, setListResetPending] = useState(false);
+  const [autoLoadPaused, setAutoLoadPaused] = useState(false);
   const memoryRequestRef = useRef(0);
+  const memoryAbortRef = useRef<AbortController | null>(null);
+  const activeSemanticRequestRef = useRef(false);
+  const loadingMoreRef = useRef(false);
+  const listResetPendingRef = useRef(false);
+  const autoLoadPausedRef = useRef(false);
+  const loadAllRunRef = useRef(0);
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
-  const load = useCallback(async (nextPage: number, nextQuery = query, nextLevel = level, filters: RecentFilter = { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }) => {
+  const load = useCallback(async (nextPage: number, nextQuery = query, nextLevel = level, filters: RecentFilter = { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }, append = false): Promise<ConclusionPage | null> => {
     const requestId = ++memoryRequestRef.current;
-    setLoading(true);
+    memoryAbortRef.current?.abort();
+    const controller = new AbortController();
+    memoryAbortRef.current = controller;
+    activeSemanticRequestRef.current = Boolean(nextQuery.trim());
+    if (!append) {
+      listResetPendingRef.current = true;
+      setListResetPending(true);
+      loadAllRunRef.current += 1;
+      loadingMoreRef.current = false;
+      autoLoadPausedRef.current = false;
+      setAutoLoadPaused(false);
+      setLoadingMore(false);
+      setLoadingAll(false);
+      setLoading(true);
+    } else {
+      setLoadingMore(true);
+    }
     setError("");
+    setFailedAppend(false);
     try {
       const params = new URLSearchParams({ page: String(nextPage), size: "30" });
       if (nextQuery.trim()) {
@@ -892,19 +928,118 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
         if (filters.observed_id) params.set("observed_id", filters.observed_id);
         if (filters.session_id) params.set("session_id", filters.session_id);
       }
-      const payload = await requestJson<ConclusionPage & { mode?: string }>(`/api/${encodeURIComponent(workspace)}/memories?${params}`);
-      if (requestId !== memoryRequestRef.current) return;
-      setPageData(payload);
-      setPage(nextPage);
+      const payload = await requestJson<ConclusionPage & { mode?: "recent" | "semantic" }>(`/api/${encodeURIComponent(workspace)}/memories?${params}`, { signal: controller.signal });
+      if (requestId !== memoryRequestRef.current) return null;
+      if (append && payload.items.length === 0) throw new Error("Honcho returned an empty page before the reported total. Loading stopped.");
+      const viewPayload: ConclusionPage & { mode: "recent" | "semantic" } = { ...payload, mode: payload.mode ?? (nextQuery.trim() ? "semantic" : "recent") };
+      setPageData((current) => {
+        const seen = new Set(append ? current.items.map((item) => item.id) : []);
+        const incoming = uniqueConclusions(viewPayload.items, seen);
+        return { ...viewPayload, items: append ? [...current.items, ...incoming] : incoming };
+      });
+      if (!append) {
+        listResetPendingRef.current = false;
+        setListResetPending(false);
+      }
       setHasLoaded(true);
-      setSelected((current) => current ? payload.items.find((item) => item.id === current.id) ?? null : null);
+      if (!append) setSelected((current) => current ? payload.items.find((item) => item.id === current.id) ?? null : null);
+      return payload;
     } catch (loadError) {
-      if (requestId !== memoryRequestRef.current) return;
-      setError(loadError instanceof Error ? loadError.message : "Unable to load memories.");
+      if (requestId === memoryRequestRef.current && !controller.signal.aborted) {
+        setFailedAppend(append);
+        setError(loadError instanceof Error ? loadError.message : "Unable to load memories.");
+      }
+      return null;
     } finally {
-      if (requestId === memoryRequestRef.current) setLoading(false);
+      if (requestId === memoryRequestRef.current) {
+        activeSemanticRequestRef.current = false;
+        if (append) setLoadingMore(false);
+        else setLoading(false);
+      }
     }
   }, [browseObserved, browseObserver, browseSession, level, query, searchObserved, searchObserver, workspace]);
+
+  const currentFilters = useMemo(() => ({ observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }), [browseObserver, browseObserved, browseSession]);
+  const loadNext = useCallback(async (expectedGeneration?: number) => {
+    if (expectedGeneration !== undefined && expectedGeneration !== memoryRequestRef.current) return;
+    if (loadingMoreRef.current || listResetPendingRef.current || loading || !hasLoaded || pageData.page >= pageData.pages || query.trim()) return;
+    loadingMoreRef.current = true;
+    try {
+      await load(pageData.page + 1, query, level, currentFilters, true);
+    } finally {
+      loadingMoreRef.current = false;
+    }
+  }, [loading, hasLoaded, pageData.page, pageData.pages, query, level, currentFilters, load]);
+
+  const loadAll = async () => {
+    if (loadingMoreRef.current || listResetPendingRef.current || loading || !hasLoaded || pageData.page >= pageData.pages || query.trim()) return;
+    autoLoadPausedRef.current = false;
+    setAutoLoadPaused(false);
+    loadingMoreRef.current = true;
+    const runId = ++loadAllRunRef.current;
+    setLoadingAll(true);
+    try {
+      for (let nextPage = pageData.page + 1; nextPage <= pageData.pages && runId === loadAllRunRef.current; nextPage++) {
+        const result = await load(nextPage, query, level, currentFilters, true);
+        if (!result || result.page >= result.pages) break;
+      }
+    } finally {
+      if (runId === loadAllRunRef.current) {
+        loadingMoreRef.current = false;
+        setLoadingAll(false);
+      }
+    }
+  };
+
+  const stopLoadingAll = () => {
+    autoLoadPausedRef.current = true;
+    setAutoLoadPaused(true);
+    loadAllRunRef.current += 1;
+    memoryRequestRef.current += 1;
+    memoryAbortRef.current?.abort();
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
+    setLoadingAll(false);
+  };
+
+  const cancelPendingSemantic = () => {
+    if (!activeSemanticRequestRef.current) return;
+    memoryRequestRef.current += 1;
+    memoryAbortRef.current?.abort();
+    activeSemanticRequestRef.current = false;
+    setLoading(false);
+    setError("");
+  };
+
+  const handleQueryChange = (nextQuery: string) => {
+    const needsChronologicalReload = pageData.mode === "semantic" || activeSemanticRequestRef.current || listResetPendingRef.current;
+    if (loadingMore || loadingAll) stopLoadingAll();
+    memoryRequestRef.current += 1;
+    memoryAbortRef.current?.abort();
+    activeSemanticRequestRef.current = false;
+    setLoading(false);
+    setError("");
+    setQuery(nextQuery);
+    if (!nextQuery.trim() && needsChronologicalReload) void load(1, "", level, currentFilters);
+  };
+
+  useEffect(() => () => {
+    memoryRequestRef.current += 1;
+    memoryAbortRef.current?.abort();
+    loadAllRunRef.current += 1;
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoaded || listResetPending || loading || loadingMore || loadingAll || autoLoadPaused || error || query.trim() || pageData.page >= pageData.pages || typeof IntersectionObserver === "undefined") return;
+    const sentinel = loadMoreSentinelRef.current;
+    if (!sentinel) return;
+    const generation = memoryRequestRef.current;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry?.isIntersecting && !autoLoadPausedRef.current) void loadNext(generation);
+    }, { rootMargin: "0px 0px 250px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasLoaded, listResetPending, loading, loadingMore, loadingAll, autoLoadPaused, error, query, pageData.page, pageData.pages, loadNext]);
 
   useEffect(() => {
     if (hasLoaded) return;
@@ -924,13 +1059,13 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
         <button className="button button-primary" type="button" onClick={() => { setSelected(null); setShowNew(true); }}><Plus size={16} aria-hidden="true" /> Add memory</button>
       </section>
       <section className="panel toolbar-panel">
-        <div className="search-control"><Search size={17} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void load(1); }} placeholder="Search memory semantically…" aria-label="Search memory" /></div>
+        <div className="search-control"><Search size={17} aria-hidden="true" /><input value={query} onChange={(event) => handleQueryChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void load(1); }} placeholder="Search memory semantically…" aria-label="Search memory" /></div>
         {query ? <>
-          <select className="select-control search-scope-control" value={searchObserver} onChange={(event) => setSearchObserver(event.target.value)} aria-label="Semantic search observer">
+          <select className="select-control search-scope-control" value={searchObserver} onChange={(event) => { cancelPendingSemantic(); setSearchObserver(event.target.value); }} aria-label="Semantic search observer">
             <option value="">Observer…</option>
             {peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}
           </select>
-          <select className="select-control search-scope-control" value={searchObserved} onChange={(event) => setSearchObserved(event.target.value)} aria-label="Semantic search observed peer">
+          <select className="select-control search-scope-control" value={searchObserved} onChange={(event) => { cancelPendingSemantic(); setSearchObserved(event.target.value); }} aria-label="Semantic search observed peer">
             <option value="">Observed…</option>
             {peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}
           </select>
@@ -946,11 +1081,22 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
         <button className="button button-secondary" type="button" onClick={() => void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined })}><Search size={15} aria-hidden="true" /> Search</button>
         <span className="toolbar-note"><Filter size={14} aria-hidden="true" /> {query ? "Semantic results · scoped to relationship" : "Newest first"}</span>
       </section>
-      {error ? <ErrorBanner message={error} onRetry={() => void load(page, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined })} /> : null}
+      {error ? <ErrorBanner message={error} onRetry={() => { if (failedAppend && !query.trim()) void loadNext(); else void load(1, query, level, currentFilters); }} /> : null}
       <section className={`panel data-panel ${loading ? "panel-loading" : ""}`}>
-        <div className="panel-heading"><div><span className="eyebrow">MEMORY LEDGER</span><h2>{query ? "Search results" : "All conclusions"}</h2></div><span className="table-count">{pageData.total.toLocaleString()} records</span></div>
+        <div className="panel-heading"><div><span className="eyebrow">MEMORY LEDGER</span><h2>{listResetPending && error ? "Previous results" : pageData.mode === "semantic" ? "Search results" : "All conclusions"}</h2></div><span className="table-count">{pageData.total.toLocaleString()} records</span></div>
         {loading ? <LoadingRows count={6} /> : pageData.items.length ? <MemoryTable items={pageData.items} onSelect={handleSelect} onOpenSession={onOpenSession} /> : <EmptyState icon={<Archive size={21} />} title="No matching memory" body="Try a broader query or remove the active level filter." />}
-        <Pagination page={pageData.page} pages={pageData.pages} onPage={(next) => void load(next, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined })} />
+        {hasLoaded && !listResetPending && pageData.mode !== "semantic" && !query.trim() ? <div className="memory-load-footer">
+          <span className="memory-load-status" role="status">{pageData.items.length.toLocaleString()} of {pageData.total.toLocaleString()} loaded{loadingAll ? " · loading remaining pages" : ""}</span>
+          {pageData.page >= pageData.pages && pageData.items.length < pageData.total ? <span className="memory-load-note">Some pages contained repeated records. Showing unique memories; the reported total is higher.</span> : null}
+          {pageData.page < pageData.pages ? <div className="memory-load-actions">
+            {loadingAll ? <button className="button button-secondary" type="button" onClick={stopLoadingAll}>Stop loading</button> : <>
+              <button className="button button-secondary" type="button" disabled={loading || loadingMore} onClick={() => { autoLoadPausedRef.current = false; setAutoLoadPaused(false); void loadNext(); }}>Load more</button>
+              <button className="button button-quiet" type="button" disabled={loading || loadingMore} onClick={() => void loadAll()}>Load all</button>
+            </>}
+          </div> : null}
+          {pageData.page < pageData.pages && !loadingAll ? <span className="memory-load-note">Load all reads every remaining page and may take time.</span> : null}
+          {pageData.page < pageData.pages && !loadingAll ? <div className="memory-load-sentinel" ref={loadMoreSentinelRef} aria-hidden="true" /> : null}
+        </div> : null}
       </section>
       {peerOptionsError ? <ErrorBanner message={peerOptionsError} /> : null}
       {selected || showNew ? <MemoryEditor workspace={workspace} peers={peerOptionItems} selected={selected} onClose={() => { setSelected(null); setShowNew(false); }} onSaved={() => { setSelected(null); setShowNew(false); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }); onChanged(); }} onOpenSession={onOpenSession} /> : null}

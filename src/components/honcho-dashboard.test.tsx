@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { HonchoDashboard } from "./honcho-dashboard";
@@ -30,11 +31,11 @@ const memory = {
   created_at: "2026-09-04T12:00:00Z",
 };
 
-const workspacePayload = (workspace: string) => ({
+const workspacePayload = (workspace: string, initialMemoryTotal = 1) => ({
   workspace,
   peers: { items: peers.map((peer) => ({ ...peer, workspace_id: workspace })), total: 2, page: 1, size: 100, pages: 1 },
   sessions: { items: [{ id: "session-1", is_active: true, workspace_id: workspace, metadata: {}, configuration: {}, created_at: "2026-09-20T00:00:00Z" }], total: 1, page: 1, size: 50, pages: 1 },
-  conclusions: { items: [memory], total: 1, page: 1, size: 20, pages: 1 },
+  conclusions: { items: [memory], total: initialMemoryTotal, page: 1, size: 20, pages: Math.ceil(initialMemoryTotal / 20) },
   queue: { pending_work_units: 0, total_work_units: 0, completed_work_units: 0, in_progress_work_units: 0 },
 });
 
@@ -83,7 +84,7 @@ function response(body: unknown, extra: Record<string, unknown> = {}) {
   };
 }
 
-function installFetch() {
+function installFetch(memoryPages: Record<number, typeof memoryPage> = {}, onMemoryPage?: (page: number, url: string) => Promise<typeof memoryPage> | null, initialMemoryTotal = 1) {
   const requests: Array<{ url: string; method: string; body?: unknown }> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -109,7 +110,7 @@ function installFetch() {
       });
     }
     if (url === "/api/oasis" || url === "/api/other") {
-      return response(workspacePayload(url.endsWith("other") ? "other" : "oasis"));
+      return response(workspacePayload(url.endsWith("other") ? "other" : "oasis", initialMemoryTotal));
     }
     if (method === "POST" && /\/peers\/[^/]+\/chat$/.test(url)) {
       return response({ content: "Answer from memory." });
@@ -133,7 +134,12 @@ function installFetch() {
       return response({ items: peers, total: peers.length, page: 1, size: 100, pages: 1 });
     }
     if (url.startsWith("/api/oasis/memories") || url.startsWith("/api/other/memories")) {
-      return response(memoryPage);
+      const params = new URL(url, "http://localhost").searchParams;
+      const page = Number(params.get("page") ?? 1);
+      const custom = onMemoryPage?.(page, url);
+      if (custom) return response(await custom);
+      if (params.has("query")) return response({ ...memoryPage, items: [{ ...memory, id: "semantic-result", content: "Semantic result" }], mode: "semantic" });
+      return response(memoryPages[page] ?? memoryPage);
     }
     if (/\/sessions\/[^/]+\/summaries$/.test(url)) {
       return response({
@@ -317,7 +323,301 @@ describe("HonchoDashboard feature additions", () => {
     render(<HonchoDashboard />);
     await waitFor(() => expect(screen.getAllByRole("button", { name: /Sessions/ }).length).toBeGreaterThan(0));
     fireEvent.click(screen.getAllByRole("button", { name: /Sessions/ })[0]);
-
     await waitFor(() => expect(screen.getByText(/Short recap of the session/)).toBeInTheDocument());
+  });
+});
+
+describe("HonchoDashboard progressive memory browsing", () => {
+  beforeEach(() => window.localStorage.clear());
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  const pages = Object.fromEntries([1, 2, 3].map((page) => [page, {
+    items: [{ ...memory, id: `conclusion-${page}`, content: `Memory ${page}` }],
+    total: 3,
+    page,
+    size: 1,
+    pages: 3,
+  }]));
+
+  it("appends the next page instead of replacing previously visible memories", async () => {
+    const { requests } = installFetch(pages);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Memory 2");
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+    expect(screen.getByText(/2 of 3 loaded/)).toBeInTheDocument();
+    expect(requests.filter(({ url }) => url.includes("/memories?") && url.includes("page=2"))).toHaveLength(1);
+  });
+
+  it("loads every remaining page only after the explicit Load all action", async () => {
+    const { requests } = installFetch(pages);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    expect(requests.some(({ url }) => url.includes("/memories?") && url.includes("page=2"))).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Load all" }));
+    await screen.findByText("Memory 3");
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+    expect(screen.getByText("Memory 2")).toBeInTheDocument();
+    expect(screen.getByText(/3 of 3 loaded/)).toBeInTheDocument();
+    expect(requests.filter(({ url }) => url.includes("/memories?") && url.includes("page=2"))).toHaveLength(1);
+    expect(requests.filter(({ url }) => url.includes("/memories?") && url.includes("page=3"))).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Load all" })).not.toBeInTheDocument();
+  });
+
+  it("loads another page when the end of the visible list enters the viewport", async () => {
+    let onIntersect: IntersectionObserverCallback | null = null;
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(callback: IntersectionObserverCallback) { onIntersect = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    const { requests } = installFetch(pages);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    await waitFor(() => expect(onIntersect).not.toBeNull());
+
+    act(() => onIntersect!([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    await screen.findByText("Memory 2");
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+    expect(requests.filter(({ url }) => url.includes("/memories?") && url.includes("page=2"))).toHaveLength(1);
+  });
+
+  it("stops an in-flight full load without appending late results or fetching the next page", async () => {
+    let finishSecondPage!: (page: typeof memoryPage) => void;
+    const pending = new Promise<typeof memoryPage>((resolve) => { finishSecondPage = resolve; });
+    const { requests } = installFetch(pages, (page) => page === 2 ? pending : null);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    fireEvent.click(screen.getByRole("button", { name: "Load all" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop loading" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Stop loading" }));
+    await act(async () => { finishSecondPage(pages[2]); await pending; });
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+    expect(screen.queryByText("Memory 2")).not.toBeInTheDocument();
+    expect(requests.some(({ url }) => url.includes("/memories?") && url.includes("page=3"))).toBe(false);
+  });
+
+  it("does not restart automatic fetching after Stop while the sentinel remains visible", async () => {
+    const callbacks: IntersectionObserverCallback[] = [];
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); }
+      observe() {}
+      disconnect() {}
+    });
+    let finishSecondPage!: (page: typeof memoryPage) => void;
+    const pending = new Promise<typeof memoryPage>((resolve) => { finishSecondPage = resolve; });
+    const { requests } = installFetch(pages, (page) => page === 2 ? pending : null);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    await waitFor(() => expect(callbacks.length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: "Load all" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop loading" }));
+    await act(async () => { finishSecondPage(pages[2]); await pending; });
+    act(() => callbacks.at(-1)!([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    expect(requests.filter(({ url }) => url.includes("/memories?") && url.includes("page=2"))).toHaveLength(1);
+  });
+
+  it("resets accumulated memories when the level filter changes", async () => {
+    installFetch(pages);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Memory 2");
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter by memory level" }), { target: { value: "deductive" } });
+    await waitFor(() => expect(screen.queryByText("Memory 2")).not.toBeInTheDocument());
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+  });
+
+  it("cancels a full load when the user switches to a semantic query", async () => {
+    let finishSecondPage!: (page: typeof memoryPage) => void;
+    const pending = new Promise<typeof memoryPage>((resolve) => { finishSecondPage = resolve; });
+    const { requests } = installFetch(pages, (page) => page === 2 ? pending : null);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    fireEvent.click(screen.getByRole("button", { name: "Load all" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop loading" })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("textbox", { name: "Search memory" }), { target: { value: "science" } });
+    await act(async () => { finishSecondPage(pages[2]); await pending; });
+    expect(screen.queryByText("Memory 2")).not.toBeInTheDocument();
+    expect(requests.some(({ url }) => url.includes("/memories?") && url.includes("page=3"))).toBe(false);
+  });
+
+  it("retries the first page after an initial load failure", async () => {
+    let attempts = 0;
+    const { requests } = installFetch(pages, (page) => {
+      if (page !== 1 || ++attempts > 1) return null;
+      return Promise.reject(new Error("Temporarily unavailable"));
+    }, 90);
+    await openSection(/Memories/);
+    await screen.findByText("Temporarily unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("Memory 1");
+    expect(requests.filter(({ url }) => url.includes("/memories?") && url.includes("page=1"))).toHaveLength(2);
+  });
+
+  it("keeps earlier pages visible when loading another page fails, then retries", async () => {
+    let attempts = 0;
+    installFetch(pages, (page) => {
+      if (page !== 2 || ++attempts > 1) return null;
+      return Promise.reject(new Error("Next page unavailable"));
+    });
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Next page unavailable");
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("Memory 2");
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+  });
+
+  it("retries page one after a filter reset fails, rather than appending the old list", async () => {
+    let attempts = 0;
+    const filtered = { ...pages[1], items: [{ ...memory, id: "filtered", content: "Filtered memory" }], total: 1, pages: 1 };
+    const { requests } = installFetch(pages, (page, url) => {
+      if (page !== 1 || !url.includes("level=deductive")) return null;
+      return ++attempts === 1 ? Promise.reject(new Error("Filter temporarily unavailable")) : Promise.resolve(filtered);
+    });
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Memory 2");
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter by memory level" }), { target: { value: "deductive" } });
+    await screen.findByText("Filter temporarily unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("Filtered memory");
+    expect(screen.queryByText("Memory 2")).not.toBeInTheDocument();
+    expect(requests.filter(({ url }) => url.includes("level=deductive") && url.includes("page=1"))).toHaveLength(2);
+    expect(requests.some(({ url }) => url.includes("level=deductive") && url.includes("page=3"))).toBe(false);
+  });
+
+  it("does not append an incompatible page after a browse-filter reset fails", async () => {
+    const { requests } = installFetch(pages, (page, url) => page === 1 && url.includes("level=deductive") ? Promise.reject(new Error("Filter failed")) : null);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Memory 2");
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter by memory level" }), { target: { value: "deductive" } });
+    await screen.findByText("Filter failed");
+    const appendButton = screen.queryByRole("button", { name: "Load more" });
+    if (appendButton) fireEvent.click(appendButton);
+    expect(requests.some(({ url }) => url.includes("level=deductive") && url.includes("page=3"))).toBe(false);
+  });
+
+  it("discards a pending semantic result when the query is cleared", async () => {
+    let finishSemantic!: (page: typeof memoryPage) => void;
+    const pending = new Promise<typeof memoryPage>((resolve) => { finishSemantic = resolve; });
+    const { requests } = installFetch(pages, (_page, url) => url.includes("query=science") ? pending : null);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    const queryInput = screen.getByRole("textbox", { name: "Search memory" });
+    fireEvent.change(queryInput, { target: { value: "science" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(requests.some(({ url }) => url.includes("query=science"))).toBe(true));
+    fireEvent.change(queryInput, { target: { value: "" } });
+    await act(async () => { finishSemantic({ ...memoryPage, items: [{ ...memory, id: "semantic-result", content: "Semantic result" }] }); await pending; });
+    expect(screen.queryByText("Semantic result")).not.toBeInTheDocument();
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+    expect(screen.getByText(/1 of 3 loaded/)).toBeInTheDocument();
+    expect(requests.filter(({ url }) => url.includes("/memories?") && url.includes("page=1") && !url.includes("query="))).toHaveLength(2);
+  });
+
+  it("discards a pending semantic result when its peer scope changes", async () => {
+    let finishSemantic!: (page: typeof memoryPage) => void;
+    const pending = new Promise<typeof memoryPage>((resolve) => { finishSemantic = resolve; });
+    const { requests } = installFetch(pages, (_page, url) => url.includes("query=science") ? pending : null);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    fireEvent.change(screen.getByRole("textbox", { name: "Search memory" }), { target: { value: "science" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(requests.some(({ url }) => url.includes("query=science"))).toBe(true));
+    fireEvent.change(screen.getByRole("combobox", { name: "Semantic search observed peer" }), { target: { value: "hermes" } });
+    await act(async () => { finishSemantic({ ...memoryPage, items: [{ ...memory, id: "semantic-result", content: "Semantic result" }] }); await pending; });
+    expect(screen.queryByText("Semantic result")).not.toBeInTheDocument();
+  });
+
+  it("returns to chronological browsing when a completed semantic query is cleared", async () => {
+    const { requests } = installFetch(pages);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    const queryInput = screen.getByRole("textbox", { name: "Search memory" });
+    fireEvent.change(queryInput, { target: { value: "science" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByText("Semantic result");
+    fireEvent.change(queryInput, { target: { value: "" } });
+    await waitFor(() => expect(screen.queryByText("Semantic result")).not.toBeInTheDocument());
+    expect(screen.getByText("Memory 1")).toBeInTheDocument();
+    expect(screen.getByText(/1 of 3 loaded/)).toBeInTheDocument();
+    expect(requests.filter(({ url }) => url.includes("/memories?") && url.includes("page=1") && !url.includes("query="))).toHaveLength(2);
+  });
+
+  it("ignores a queued scroll callback after the semantic query draft changes", async () => {
+    const callbacks: IntersectionObserverCallback[] = [];
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); }
+      observe() {}
+      disconnect() {}
+    });
+    const { requests } = installFetch(pages);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    await waitFor(() => expect(callbacks.length).toBeGreaterThan(0));
+    const stale = callbacks.at(-1)!;
+    fireEvent.change(screen.getByRole("textbox", { name: "Search memory" }), { target: { value: "science" } });
+    act(() => stale([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    expect(requests.some(({ url }) => url.includes("/memories?") && url.includes("page=2"))).toBe(false);
+  });
+
+  it("ignores an old intersection callback after a filter reset begins", async () => {
+    const callbacks: IntersectionObserverCallback[] = [];
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); }
+      observe() {}
+      disconnect() {}
+    });
+    let finishFiltered!: (page: typeof memoryPage) => void;
+    const pending = new Promise<typeof memoryPage>((resolve) => { finishFiltered = resolve; });
+    const filtered = { ...pages[1], items: [{ ...memory, id: "filtered", content: "Filtered memory" }], total: 1, pages: 1 };
+    const { requests } = installFetch(pages, (page, url) => page === 1 && url.includes("level=deductive") ? pending : null);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    await waitFor(() => expect(callbacks.length).toBeGreaterThan(0));
+    const stale = callbacks.at(-1)!;
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter by memory level" }), { target: { value: "deductive" } });
+    act(() => stale([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    await act(async () => { finishFiltered(filtered); await pending; });
+    expect(await screen.findByText("Filtered memory")).toBeInTheDocument();
+    expect(requests.some(({ url }) => url.includes("/memories?") && url.includes("page=2") && !url.includes("level=deductive"))).toBe(false);
+  });
+
+  it("counts only unique IDs when the first or an appended page contains duplicates", async () => {
+    const duplicateFirst = { ...pages[1], items: [pages[1].items[0], pages[1].items[0]], total: 3, pages: 2 };
+    const duplicateSecond = { ...pages[2], items: [pages[2].items[0], pages[2].items[0]], total: 3, pages: 2 };
+    installFetch({ 1: duplicateFirst, 2: duplicateSecond });
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    expect(screen.getAllByText("Memory 1")).toHaveLength(1);
+    expect(screen.getByText(/1 of 3 loaded/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Memory 2");
+    expect(screen.getAllByText("Memory 2")).toHaveLength(1);
+    expect(screen.getByText(/2 of 3 loaded/)).toBeInTheDocument();
+  });
+
+  it("does not show a repeated conclusion twice when pages overlap", async () => {
+    const overlapping = { ...pages, 2: { ...pages[2], items: [pages[1].items[0], pages[2].items[0]] } };
+    installFetch(overlapping);
+    await openSection(/Memories/);
+    await screen.findByText("Memory 1");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Memory 2");
+    expect(screen.getAllByText("Memory 1")).toHaveLength(1);
+    expect(screen.getByText(/2 of 3 loaded/)).toBeInTheDocument();
   });
 });

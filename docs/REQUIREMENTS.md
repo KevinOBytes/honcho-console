@@ -32,16 +32,18 @@ The server shall resolve the Honcho base URL and API key from explicit environme
 **Status:** Accepted
 **Priority:** Must
 
-The UI shall list paginated Honcho conclusions and support peer/level filters plus semantic search while preserving the source IDs, reasoning level, session association, and creation timestamp.
+The UI shall progressively append paginated Honcho conclusions when the end of the visible list enters the viewport, with manual Load more and explicit Load all controls, and support peer/level filters plus separate semantic search while preserving source IDs, reasoning level, session association, and creation timestamp.
 
 #### Acceptance criteria
 - Empty, loading, error, and populated states are distinct.
-- Pagination reports the API total and never silently presents a partial list as complete.
+- Progressive browsing reports loaded unique records and the API total, never silently presenting a partial list as complete. Page overlap is deduplicated by conclusion ID.
+- Load all reads remaining pages sequentially, shows progress, and can be stopped without discarding already loaded records or automatically restarting. Errors retain earlier pages and retry the failed page in its correct mode.
+- Changing browse filters or running semantic search resets the accumulated chronological list. A failed reset disables further appends until page one succeeds. Editing a search query or its peer scope cancels stale in-flight results. Semantic results do not auto-page.
 - Semantic results are labeled separately from chronological browsing.
 
 #### Verification
-- Route and UI tests for conclusion normalization, filtering, and result-state rendering.
-- Browser inspection against live `oasis` data.
+- Route and UI tests for conclusion normalization, filtering, progressive loading, stop/reset behavior, and result-state rendering.
+- Browser inspection against live `oasis` data, loading a bounded number of pages rather than automatically fetching the full workspace.
 
 ### REQ-MEM-002 — Curate memory safely
 

@@ -7,7 +7,7 @@ Honcho (by Plastic Labs) has no first-party admin UI. The only public alternativ
 What you get:
 
 - Connection health with peer, memory, and session totals, plus workspace discovery from the credential's permissions
-- Browse and filter conclusions (Honcho's memories) with pagination and semantic search
+- Browse conclusions progressively as you scroll, with explicit Load more and Load all controls, plus filters and separate semantic search
 - Create, replace (create-then-delete with rollback), and delete conclusions; destructive actions require explicit confirmation
 - Peer cards: view the representation and edit the card itself
 - Recent sessions and their messages, read-only
@@ -28,7 +28,7 @@ Open `http://127.0.0.1:3000`. By default the server reads the existing Honcho co
 ## Included workflows
 
 - View live connection health and peer, memory, and session totals for a configured, discovered, or manually entered workspace.
-- Browse and filter conclusions, run semantic search, add a conclusion, replace its content, or delete it after confirmation.
+- Browse and filter conclusions, load more on scroll, or choose Load all to fetch every reported page sequentially with progress and a Stop control. Stop pauses automatic loading until an explicit loading action or filter reset. Large workspaces can take time and memory; browsing stays paged by default. Run semantic search separately, add a conclusion, replace its content, or delete it after confirmation.
 - Browse peers, inspect the observer-to-target representation, and edit the corresponding peer card.
 - Browse recent sessions and inspect their messages without modifying conversation history.
 

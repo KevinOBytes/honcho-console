@@ -6,15 +6,15 @@ Generated: 2026-09-21
 
 ## In progress
 
-None. The feature wave (dialectic Q&A, representation inspector, peer/global message search, session summaries, dream controls + queue, change journal, replace diff preview, session↔memory cross-links, export/backup, composition dashboard) is implemented, tested (117 tests), built, smoke-verified live, and browser-QA'd.
+None. The 0.2.0 wave shipped 2026-11-04: session context view, memory triage (Jaccard duplicate groups + confirmed delete), growth breakdown by level/observer, journal filters + NDJSON export, streaming dialectic, scope-aware views, and a read-only webhook audit listing. All implemented with tests, built, smoke-verified live, and released as v0.2.0 against Honcho v3.5.
 
 ## Ready
 
-No committed follow-on scope. Candidate ideas, each requiring a boundary/requirement review first:
+Candidate ideas, each requiring a boundary/requirement review first:
 
-- Journal viewer filtering by action/workspace and a "clear journal" action (currently append-only, view-only).
-- Streaming dialectic responses (Honcho supports `stream`) instead of a single blocking answer.
-- Workspace-level dream scheduling and dream history, if Honcho exposes it.
+- Dream history UI: the Honcho server (as of v3.5) exposes `schedule_dream` and queue status but no dream-history listing API; revisit when the server ships one.
+- Workspace-scope recall preview per scope (Honcho supports scope-scoped chat/representation; the console shows scopes read-only today).
+- Semantic search across all sessions with a composition dashboard time-range picker.
 
 New deployment, remote access, authentication, bulk mutation, or additional dependencies require an explicit request and boundary review.
 

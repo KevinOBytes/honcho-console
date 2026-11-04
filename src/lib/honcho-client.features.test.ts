@@ -71,7 +71,7 @@ describe("HonchoClient dialectic and retrieval additions", () => {
       reasoningLevel: "medium",
     });
 
-    expect(result.content).toBe("You asked about models.");
+    expect((result as { content: string | null }).content).toBe("You asked about models.");
     expect(method).toBe("POST");
     expect(path).toBe(`/v3/workspaces/oasis/peers/hermes/chat`);
     const parsed = JSON.parse(body) as Record<string, unknown>;
@@ -99,7 +99,7 @@ describe("HonchoClient dialectic and retrieval additions", () => {
     });
 
     const result = await clientWith(baseUrl).chatWithPeer("oasis", "hermes", { query: "hello" });
-    expect(result.content).toBeNull();
+    expect((result as { content: string | null }).content).toBeNull();
     expect((JSON.parse(body) as Record<string, unknown>).reasoning_level).toBe("low");
   });
 

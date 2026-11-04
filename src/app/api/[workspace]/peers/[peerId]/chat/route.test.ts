@@ -31,6 +31,35 @@ describe("POST /api/[workspace]/peers/[peerId]/chat", () => {
     mockedGetHonchoClient.mockResolvedValue({ client } as never);
   });
 
+  it("streams the upstream response when stream is requested", async () => {
+    const upstream = new Response('data: {"content":"Kevin prefers local models."}\n\n', {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+    client.chatWithPeer.mockResolvedValue(upstream);
+
+    const response = await POST(makeRequest({ query: "what do you know?", stream: true }), routeContext);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("cache-control")).toContain("no-cache");
+    await expect(response.text()).resolves.toContain("Kevin prefers local models.");
+    expect(client.chatWithPeer).toHaveBeenCalledWith(
+      "oasis",
+      "hermes",
+      expect.objectContaining({ query: "what do you know?", stream: true } as never),
+    );
+  });
+
+  it("rejects a non-stream upstream answer for a streaming request", async () => {
+    client.chatWithPeer.mockResolvedValue({ content: "plain answer" });
+
+    const response = await POST(makeRequest({ query: "what do you know?", stream: true }), routeContext);
+
+    expect(response.status).toBe(502);
+    expect(client.chatWithPeer).toHaveBeenCalledWith("oasis", "hermes", expect.objectContaining({ stream: true } as never));
+  });
+
   it("rejects an empty query before contacting Honcho", async () => {
     const response = await POST(makeRequest({ query: "   " }), routeContext);
     expect(response.status).toBe(400);

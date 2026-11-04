@@ -50,6 +50,7 @@ const conclusionSchema = z.object({
   level: z
     .enum(["explicit", "deductive", "inductive", "contradiction"])
     .default("explicit"),
+  times_derived: z.number().int().nullable().default(null),
   created_at: z.string(),
 });
 
@@ -101,6 +102,35 @@ const workingRepresentationSchema = z.object({
   representation: z.string(),
 });
 
+const sessionContextSchema = z.object({
+  id: z.string(),
+  messages: z.array(messageSchema),
+  summary: summarySchema.nullable().default(null),
+  peer_representation: z.string().nullable().default(null),
+  peer_card: z.array(z.string()).nullable().default(null),
+});
+
+const scopeSchema = z.object({
+  id: z.string(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  created_at: z.string(),
+  session_count: z.number().int().nullable().default(null),
+});
+
+const scopeStatusSchema = z.object({
+  backfill_status: z.record(z.string(), z.record(z.string(), z.unknown())).default({}),
+});
+
+const webhookEndpointSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string().nullable().default(null),
+  url: z.string(),
+  created_at: z.string(),
+});
+
+const scopePageSchema = pageSchema(scopeSchema);
+const webhookPageSchema = pageSchema(webhookEndpointSchema);
+
 const dialecticResponseSchema = z.object({
   content: z.string().nullable(),
 });
@@ -119,6 +149,12 @@ export type ConclusionPage = z.infer<typeof conclusionPageSchema>;
 export type QueueStatus = z.infer<typeof queueStatusSchema>;
 export type Summary = z.infer<typeof summarySchema>;
 export type SessionSummaries = z.infer<typeof sessionSummariesSchema>;
+export type SessionContext = z.infer<typeof sessionContextSchema>;
+export type Scope = z.infer<typeof scopeSchema>;
+export type ScopeStatus = z.infer<typeof scopeStatusSchema>;
+export type WebhookEndpoint = z.infer<typeof webhookEndpointSchema>;
+export type ScopePage = z.infer<typeof scopePageSchema>;
+export type WebhookPage = z.infer<typeof webhookPageSchema>;
 
 export type ConclusionFilters = {
   observer_id?: string;
@@ -401,8 +437,8 @@ export class HonchoClient {
   async chatWithPeer(
     workspace: string,
     peerId: string,
-    options: { query: string; target?: string; sessionId?: string; reasoningLevel?: ReasoningLevel },
-  ): Promise<{ content: string | null }> {
+    options: { query: string; target?: string; sessionId?: string; reasoningLevel?: ReasoningLevel; stream?: boolean },
+  ): Promise<{ content: string | null } | Response> {
     const query = options.query.trim();
     if (!query || query.length > MAX_DIALECTIC_QUERY_LENGTH) {
       throw new Error(`Chat query must be between 1 and ${MAX_DIALECTIC_QUERY_LENGTH.toLocaleString()} characters.`);
@@ -414,7 +450,7 @@ export class HonchoClient {
     }
     const body: Record<string, unknown> = {
       query,
-      stream: false,
+      stream: options.stream === true,
       reasoning_level: reasoningLevel,
     };
     if (options.target !== undefined && options.target !== "") {
@@ -422,6 +458,16 @@ export class HonchoClient {
     }
     if (options.sessionId !== undefined && options.sessionId !== "") {
       body.session_id = parseResourceId(options.sessionId, "session");
+    }
+    if (options.stream === true) {
+      return this.request(
+        `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/peers/${pathSegment(observer)}/chat`,
+        "POST",
+        body,
+        z.any(),
+        120_000,
+        true,
+      ) as Promise<Response>;
     }
     return this.request(
       `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/peers/${pathSegment(observer)}/chat`,
@@ -487,6 +533,64 @@ export class HonchoClient {
       "GET",
       undefined,
       sessionSummariesSchema,
+    );
+  }
+
+  async getSessionContext(workspace: string, sessionId: string): Promise<SessionContext> {
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/sessions/${pathSegment(validateSessionId(sessionId))}/context`,
+      "GET",
+      undefined,
+      sessionContextSchema,
+    );
+  }
+
+  async listScopes(workspace: string, page = 1, size = 100): Promise<ScopePage> {
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/scopes/list?${pageParams(page, size)}`,
+      "POST",
+      { filters: {} },
+      scopePageSchema,
+    );
+  }
+
+  async listAllScopes(workspace: string): Promise<{ items: Scope[]; total: number; truncated: boolean }> {
+    const first = await this.listScopes(workspace, 1, 100);
+    const pageLimit = Math.min(first.pages, MAX_WORKSPACE_DISCOVERY_PAGES);
+    let items = first.items.slice(0, MAX_WORKSPACE_DISCOVERY_ITEMS);
+    for (let page = 2; page <= pageLimit && items.length < MAX_WORKSPACE_DISCOVERY_ITEMS; page += 1) {
+      const next = await this.listScopes(workspace, page, 100);
+      items = [...items, ...next.items].slice(0, MAX_WORKSPACE_DISCOVERY_ITEMS);
+    }
+    return { items, total: first.total, truncated: first.pages > pageLimit || first.total > items.length };
+  }
+
+  async listScopeSessions(workspace: string, scopeId: string, page = 1, size = 100): Promise<SessionPage> {
+    const scope = parseResourceId(scopeId, "scope");
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/scopes/${pathSegment(scope)}/sessions/list?${pageParams(page, size)}`,
+      "POST",
+      {},
+      sessionPageSchema,
+    );
+  }
+
+  async getScopeStatus(workspace: string, scopeId: string): Promise<ScopeStatus> {
+    const scope = parseResourceId(scopeId, "scope");
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/scopes/${pathSegment(scope)}/status`,
+      "GET",
+      undefined,
+      scopeStatusSchema,
+    );
+  }
+
+  async listWebhooks(workspace: string, page = 1, size = 100): Promise<WebhookPage> {
+    return this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/webhooks?${pageParams(page, size)}`,
+      "GET",
+      undefined,
+      webhookPageSchema,
     );
   }
 
@@ -556,6 +660,7 @@ export class HonchoClient {
     body: unknown,
     schema: T,
     timeoutMs = 15_000,
+    raw = false,
   ): Promise<z.infer<T>> {
     const response = await fetch(`${this.#baseUrl}${path}`, {
       method,
@@ -583,6 +688,10 @@ export class HonchoClient {
         // Keep the status-only error when Honcho does not return JSON.
       }
       throw new Error(`Honcho returned HTTP ${response.status}.${detail}`);
+    }
+
+    if (raw) {
+      return response as z.infer<T>;
     }
 
     if (response.status === 204) {

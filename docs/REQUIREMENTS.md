@@ -232,3 +232,111 @@ The interface shall be responsive, keyboard operable, accessible at common deskt
 #### Verification
 - Component tests with Testing Library.
 - Browser screenshots, keyboard checks, viewport checks, and console inspection.
+
+### REQ-SESSION-003 — Session context view
+
+**Status:** Accepted
+**Priority:** Should
+
+The session view shall display the Honcho session context payload (summary, peer representation, peer card, and message window assembled by the server) as a read-only "injected view" next to the raw message stream.
+
+#### Acceptance criteria
+- The request is read-only (`GET /v3/.../sessions/{id}/context` via a same-origin route) and never mutates Honcho.
+- Summary and representation blocks are labeled as generated/derived views.
+- A session with no assembled context shows an explicit empty state; failures show an error with retry.
+- Generated content is never persisted or presented as stored memory.
+
+#### Verification
+- Route test for payload pass-through and identifier validation; component test for populated and empty states.
+
+### REQ-PEER-005 — Streaming dialectic
+
+**Status:** Accepted
+**Priority:** Should
+
+The dialectic panel shall offer an optional streaming mode that pipes the upstream answer as it arrives and renders it progressively, keeping the existing non-streaming path.
+
+#### Acceptance criteria
+- Query length and reasoning-level validation are identical in both modes (maximum 10,000 characters).
+- Streaming requests forward `stream: true`; the console passes through the upstream content-type and disables buffering.
+- Partial text renders incrementally with the streaming state labeled; empty streams degrade to an explicit empty response.
+- The exchange remains read-only; nothing is persisted.
+
+#### Verification
+- Parser unit tests for SSE/plain chunk streams; route tests for stream passthrough and non-stream contract failures.
+
+### REQ-MEM-007 — Memory triage for curation
+
+**Status:** Accepted
+**Priority:** Should
+
+The overview shall offer a triage view that detects near-duplicate conclusions from a bounded scan and supports deleting duplicates through the existing confirmed, journaled mutation path.
+
+#### Acceptance criteria
+- The scan is bounded (5,000 records hard cap) and reports analyzed/total with an explicit truncation note.
+- Near-duplicates are grouped by observer/observed pairs using a token-set similarity threshold of 0.8 with no external dependencies.
+- Group members show level, derivation count, timestamp, and truncated content; destructive actions reuse the existing confirmation and change-journal invariants.
+- Analysis is read-only; deletion is the only mutation and always requires confirmation.
+
+#### Verification
+- Similarity/clustering unit tests; route tests for bounds, filters, and truncation; component test for the delete-after-confirm flow.
+
+### REQ-MEM-008 — Memory growth breakdown
+
+**Status:** Accepted
+**Priority:** Should
+
+The composition dashboard shall break the last-30-days conclusion counts down by reasoning level and by observer, rendered without a charting dependency.
+
+#### Acceptance criteria
+- Buckets are computed server-side from the same bounded scan as the existing 30-day sparkline.
+- The stacked bar view shows per-level segments and a legend; the observer list shows the top contributors for the window.
+- Missing or failed breakdown data degrades to the existing sparkline, never to fabricated numbers.
+
+#### Verification
+- Aggregation unit tests; dashboard component test tolerant of pre-breakdown payloads; live run against a workspace with thousands of conclusions.
+
+### REQ-MEM-009 — Journal filters and export
+
+**Status:** Accepted
+**Priority:** Should
+
+The recent-changes panel shall filter the change journal by action or workspace and export the filtered view as a local NDJSON download.
+
+#### Acceptance criteria
+- Filters are validated server-side (action set, workspace identifier, bounded limits).
+- Export returns a download attachment (`.jsonl`) bounded to the most recent 5,000 matching entries and never writes anything server-side.
+- The journal remains append-only; export and filtering never modify it.
+
+#### Verification
+- Filter/export route tests; journal library tests for filtered reads; live smoke asserting the export attachment.
+
+### REQ-SCOPE-001 — Scope-aware views
+
+**Status:** Accepted
+**Priority:** Should
+
+A Scopes section shall list the workspace scopes with membership and backfill status, read-only.
+
+#### Acceptance criteria
+- Scope listing, per-scope session membership, and backfill job state come from same-origin routes backed by Honcho v3 scope endpoints.
+- Unknown scopes and empty workspaces produce explicit empty states; failures surface with retry.
+- No scope creation, membership mutation, or backfill triggering is exposed.
+
+#### Verification
+- Route tests for list/detail and validation; component test for listing and selection.
+
+### REQ-WEB-001 — Webhook audit listing
+
+**Status:** Accepted
+**Priority:** Should
+
+A Webhooks section shall list the configured outbound webhook endpoints for the workspace, read-only.
+
+#### Acceptance criteria
+- Listing comes from a same-origin route backed by `GET /v3/.../webhooks`.
+- Endpoint URL, identifier, and creation time are shown; an empty workspace shows an explicit empty state.
+- Creating, testing, or deleting endpoints is not exposed; no credentials or signed payloads are fetched or rendered.
+
+#### Verification
+- Route test and component test for populated and empty states.

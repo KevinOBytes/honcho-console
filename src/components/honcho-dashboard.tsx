@@ -16,7 +16,7 @@ import {
   Download,
   FileText,
   Filter,
-  History,
+  Layers,
   LoaderCircle,
   MessageSquareText,
   MoonStar,
@@ -32,6 +32,7 @@ import {
   Trash2,
   UserRound,
   UsersRound,
+  Webhook,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -50,8 +51,10 @@ import type {
 } from "@/lib/honcho-client";
 import type { MemoryStats } from "@/lib/memory-stats";
 import { compactId, formatDate, jsonPreview } from "@/lib/format";
+import { streamResponseText } from "@/lib/stream-text";
+import { GrowthChart, ScopesView, SessionContextPanel, TriagePanel, WebhooksView } from "./memory-panels";
 
-type Section = "overview" | "memories" | "peers" | "sessions" | "search";
+type Section = "overview" | "memories" | "peers" | "sessions" | "search" | "scopes" | "webhooks";
 type Level = "all" | Conclusion["level"];
 
 // Mirrors REASONING_LEVELS from the server-side Honcho client (client components
@@ -109,6 +112,8 @@ function sectionTitle(section: Section): string {
     peers: "Peer context",
     sessions: "Session archive",
     search: "Global search",
+    scopes: "Scopes",
+    webhooks: "Webhooks",
   }[section];
 }
 
@@ -421,6 +426,8 @@ export function HonchoDashboard() {
           <NavButton section="peers" active={activeSection} onSelect={setActiveSection} icon={<UsersRound size={17} />} label="Peers" count={workspaceData?.peers.total} />
           <NavButton section="sessions" active={activeSection} onSelect={setActiveSection} icon={<MessageSquareText size={17} />} label="Sessions" count={workspaceData?.sessions.total} />
           <NavButton section="search" active={activeSection} onSelect={setActiveSection} icon={<Search size={17} />} label="Global search" />
+          <NavButton section="scopes" active={activeSection} onSelect={setActiveSection} icon={<Layers size={17} />} label="Scopes" />
+          <NavButton section="webhooks" active={activeSection} onSelect={setActiveSection} icon={<Webhook size={17} />} label="Webhooks" />
         </nav>
 
         <div className="sidebar-footer">
@@ -428,7 +435,7 @@ export function HonchoDashboard() {
             <ShieldCheck size={16} aria-hidden="true" />
             <span>{status?.isRemote ? "Remote mode enabled" : "Local-only console"}<br /><em>Credentials stay server-side</em></span>
           </div>
-          <span className="version-label">HONCHO CONSOLE · 0.1.0</span>
+          <span className="version-label">HONCHO CONSOLE · 0.2.0</span>
         </div>
       </aside>
 
@@ -474,6 +481,8 @@ export function HonchoDashboard() {
               {activeSection === "peers" ? <PeersView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.peers} /> : null}
               {activeSection === "sessions" ? <SessionsView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.sessions} focus={sessionFocus} /> : null}
               {activeSection === "search" ? <GlobalSearchView workspace={workspace} onOpenSession={openSession} /> : null}
+              {activeSection === "scopes" ? <ScopesView key={`${workspace}-${refreshGeneration}`} workspace={workspace} /> : null}
+              {activeSection === "webhooks" ? <WebhooksView key={`${workspace}-${refreshGeneration}`} workspace={workspace} /> : null}
             </>
           ) : null}
           {workspace && loadingWorkspace && !workspaceData ? <LoadingRows count={6} /> : null}
@@ -606,6 +615,8 @@ function OverviewView({
 
       <MemoryStatsPanel key={workspace} workspace={workspace} onOpenSession={onOpenSession} />
 
+      <TriagePanel key={workspace} workspace={workspace} />
+
       <section className="panel recent-panel">
         <div className="panel-heading">
           <div><span className="eyebrow">LATEST SIGNAL</span><h2>Recent memory</h2></div>
@@ -676,6 +687,7 @@ function MemoryStatsPanel({ workspace, onOpenSession }: { workspace: string; onO
           <div className="stats-spark">
             <span className="eyebrow">Conclusions · last 30 days</span>
             <Sparkline points={stats.daily.map((bucket) => bucket.count)} />
+            <GrowthChart dailyByLevel={stats.dailyByLevel} dailyByObserver={stats.dailyByObserver} />
             <div className="stats-toplists">
               <div>
                 <span className="eyebrow">Top observers</span>
@@ -711,21 +723,35 @@ function Sparkline({ points }: { points: number[] }) {
 function RecentChangesPanel({ workspace }: { workspace: string }) {
   const [entries, setEntries] = useState<JournalEntry[] | null>(null);
   const [error, setError] = useState("");
+  const [action, setAction] = useState("all");
 
   useEffect(() => {
     const controller = new AbortController();
-    requestJson<{ items: JournalEntry[] }>(`/api/${encodeURIComponent(workspace)}/journal?limit=8`, { signal: controller.signal })
+    const actionParam = action === "all" ? "" : `&action=${encodeURIComponent(action)}`;
+    requestJson<{ items: JournalEntry[] }>(`/api/${encodeURIComponent(workspace)}/journal?limit=8${actionParam}`, { signal: controller.signal })
       .then((payload) => setEntries(payload.items))
       .catch((loadError) => {
         if (controller.signal.aborted) return;
         setError(loadError instanceof Error ? loadError.message : "Unable to load the change journal.");
       });
     return () => controller.abort();
-  }, [workspace]);
+  }, [action, workspace]);
 
   return (
     <section className="panel compact-panel">
-      <div className="panel-heading"><div><span className="eyebrow">AUDIT TRAIL</span><h2>Recent changes</h2></div><History size={17} aria-hidden="true" /></div>
+      <div className="panel-heading"><div><span className="eyebrow">AUDIT TRAIL</span><h2>Recent changes</h2></div>
+        <div className="journal-controls">
+          <select className="select-control journal-filter" value={action} onChange={(event) => setAction(event.target.value)} aria-label="Filter journal by action">
+            <option value="all">All actions</option>
+            <option value="create">create</option>
+            <option value="replace">replace</option>
+            <option value="delete">delete</option>
+            <option value="card-update">card-update</option>
+            <option value="dream">dream</option>
+          </select>
+          <a className="text-button journal-export" href={`/api/${encodeURIComponent(workspace)}/journal/export${action === "all" ? "" : `?action=${encodeURIComponent(action)}`}`} download>Export <Download size={14} aria-hidden="true" /></a>
+        </div>
+      </div>
       {error ? <ErrorBanner message={error} /> : null}
       <div className="journal-list">
         {entries?.length ? entries.map((entry, index) => (
@@ -1406,7 +1432,7 @@ function SessionsView({ workspace, initialPage, focus }: { workspace: string; in
       <section className="section-intro"><div><span className="eyebrow">SESSIONS / {sessionPageData.total.toLocaleString()} TOTAL</span><h2>Session archive</h2><p>Inspect conversation history without mutating messages.</p></div><div className="context-pill"><Archive size={15} aria-hidden="true" /> Immutable history view</div></section>
       <section className="session-layout">
         <div className="panel session-list-panel"><div className="panel-heading"><div><span className="eyebrow">RECENT SESSIONS</span><h2>{sessionPageData.total.toLocaleString()} total</h2></div><MessageSquareText size={18} aria-hidden="true" /></div>{sessionPageError ? <ErrorBanner message={sessionPageError} onRetry={() => void loadSessionsPage(requestedPage)} /> : null}<div className="session-list">{sessionPageData.items.map((session) => <button className={`session-list-row ${selected?.id === session.id ? "session-selected" : ""}`} type="button" key={session.id} onClick={() => void loadMessages(session)}><span className={`session-pip ${session.is_active ? "session-live" : ""}`} /><span className="session-list-copy"><strong>{compactId(session.id, 26)}</strong><small>{formatDate(session.created_at)}</small></span><span className="mono">{session.is_active ? "LIVE" : "CLOSED"}</span></button>)}{!sessionPageData.items.length ? <EmptyState icon={<MessageSquareText size={20} />} title="No sessions" body="No sessions were returned for this workspace." /> : null}</div><Pagination page={sessionPageData.page} pages={sessionPageData.pages} disabled={sessionPageLoading} onPage={(next) => void loadSessionsPage(next)} /></div>
-        <div className="panel messages-panel"><div className="panel-heading"><div><span className="eyebrow">MESSAGE STREAM</span><h2>{selected ? compactId(selected.id, 28) : "Select a session"}</h2></div>{selected ? <span className={`state-badge ${selected.is_active ? "state-active" : ""}`}>{selected.is_active ? "Active" : "Closed"}</span> : null}</div>{selected ? <SessionSummariesPanel key={selected.id} workspace={workspace} sessionId={selected.id} /> : null}{error ? <ErrorBanner message={error} onRetry={() => { if (selected) void loadMessages(selected, messagePage); }} /> : null}{loading ? <LoadingRows count={5} /> : messages?.items.length ? <><div className="message-stream">{messages.items.map((message) => <MessageRow key={message.id} message={message} />)}</div><Pagination page={messages.page} pages={messages.pages} onPage={(page) => { if (selected) void loadMessages(selected, page); }} /></> : <EmptyState icon={<MessageSquareText size={21} />} title="No messages in view" body={selected ? "This session has no messages on the selected page." : "Choose a session to inspect its message stream."} />}</div>
+        <div className="panel messages-panel"><div className="panel-heading"><div><span className="eyebrow">MESSAGE STREAM</span><h2>{selected ? compactId(selected.id, 28) : "Select a session"}</h2></div>{selected ? <span className={`state-badge ${selected.is_active ? "state-active" : ""}`}>{selected.is_active ? "Active" : "Closed"}</span> : null}</div>{selected ? <SessionSummaryPanelWrapper workspace={workspace} sessionId={selected.id} /> : null}{error ? <ErrorBanner message={error} onRetry={() => { if (selected) void loadMessages(selected, messagePage); }} /> : null}{loading ? <LoadingRows count={5} /> : messages?.items.length ? <><div className="message-stream">{messages.items.map((message) => <MessageRow key={message.id} message={message} />)}</div><Pagination page={messages.page} pages={messages.pages} onPage={(page) => { if (selected) void loadMessages(selected, page); }} /></> : <EmptyState icon={<MessageSquareText size={21} />} title="No messages in view" body={selected ? "This session has no messages on the selected page." : "Choose a session to inspect its message stream."} />}</div>
       </section>
     </div>
   );
@@ -1419,6 +1445,7 @@ function MessageRow({ message }: { message: Message }) {
 function DialecticPanel({ workspace, observer, target }: { workspace: string; observer: string; target: string }) {
   const [query, setQuery] = useState("");
   const [reasoningLevel, setReasoningLevel] = useState<ReasoningLevel>("low");
+  const [stream, setStream] = useState(false);
   const [answer, setAnswer] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1428,17 +1455,43 @@ function DialecticPanel({ workspace, observer, target }: { workspace: string; ob
     const requestId = ++DialecticPanel.requestCounter;
     setLoading(true);
     setError("");
+    const body = JSON.stringify({
+      query: query.trim(),
+      reasoning_level: reasoningLevel,
+      ...(target ? { target } : {}),
+      ...(stream ? { stream: true } : {}),
+    });
     try {
-      const payload = await requestJson<{ content: string | null }>(`/api/${encodeURIComponent(workspace)}/peers/${encodeURIComponent(observer)}/chat`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          query: query.trim(),
-          reasoning_level: reasoningLevel,
-          ...(target ? { target } : {}),
-        }),
-      });
-      setAnswer(payload.content ?? "(empty response)");
+      if (stream) {
+        const response = await fetch(`/api/${encodeURIComponent(workspace)}/peers/${encodeURIComponent(observer)}/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as { error?: string };
+          throw new Error(payload.error ?? `Dialectic request failed with HTTP ${response.status}.`);
+        }
+        const contentType = response.headers.get("content-type") ?? "";
+        if (contentType.includes("application/json") || !response.body) {
+          const payload = (await response.json().catch(() => ({}))) as { content?: string | null };
+          setAnswer(payload.content ?? "(empty response)");
+        } else {
+          setAnswer("");
+          const full = await streamResponseText(response, (chunk) => {
+            if (requestId !== DialecticPanel.requestCounter) return;
+            setAnswer((current) => `${current ?? ""}${chunk}`);
+          });
+          if (requestId === DialecticPanel.requestCounter) setAnswer(full === "" ? "(empty response)" : full);
+        }
+      } else {
+        const payload = await requestJson<{ content: string | null }>(`/api/${encodeURIComponent(workspace)}/peers/${encodeURIComponent(observer)}/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+        setAnswer(payload.content ?? "(empty response)");
+      }
       setQuery("");
     } catch (askError) {
       setError(askError instanceof Error ? askError.message : "Unable to complete the dialectic request.");
@@ -1463,13 +1516,14 @@ function DialecticPanel({ workspace, observer, target }: { workspace: string; ob
         <select className="select-control" value={reasoningLevel} onChange={(event) => setReasoningLevel(event.target.value as ReasoningLevel)} aria-label="Dialectic reasoning level">
           {REASONING_LEVEL_CHOICES.map((level) => <option key={level} value={level}>{level}</option>)}
         </select>
+        <label className="inspector-check"><input type="checkbox" checked={stream} onChange={(event) => setStream(event.target.checked)} aria-label="Stream the dialectic answer" />Stream</label>
         <button className="button button-primary" type="button" onClick={() => void ask()} disabled={loading || !query.trim()}>
           {loading ? <LoaderCircle size={15} className="spin" aria-hidden="true" /> : <Sparkles size={15} aria-hidden="true" />} Ask
         </button>
       </div>
       {answer !== null ? (
         <div className="chat-response" aria-live="polite">
-          <span className="eyebrow">Answer</span>
+          <span className="eyebrow">{stream ? "Streaming answer" : "Answer"}</span>
           <p>{answer}</p>
         </div>
       ) : null}
@@ -1646,6 +1700,15 @@ function PeerMessageSearch({ workspace, peerId }: { workspace: string; peerId: s
         ) : <span className="muted">No matching messages for this peer.</span>
       ) : null}
     </section>
+  );
+}
+
+function SessionSummaryPanelWrapper({ workspace, sessionId }: { workspace: string; sessionId: string }) {
+  return (
+    <>
+      <SessionSummariesPanel key={`summaries-${sessionId}`} workspace={workspace} sessionId={sessionId} />
+      <SessionContextPanel key={`context-${sessionId}`} workspace={workspace} sessionId={sessionId} />
+    </>
   );
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "honcho-console",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "A local-only web console for browsing and curating Honcho memory.",

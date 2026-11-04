@@ -17,6 +17,7 @@ const payload: ExportPayload = {
       observed_id: "kevo",
       session_id: "session-9",
       level: "explicit",
+      times_derived: null,
       created_at: "2026-09-10T12:00:00Z",
     },
   ],

@@ -17,6 +17,8 @@ export type MemoryStats = {
   oldest: string | null;
   newest: string | null;
   daily: Array<{ date: string; count: number }>;
+  dailyByLevel: Array<{ date: string; levels: Record<string, number> }>;
+  dailyByObserver: Array<{ date: string; observers: Record<string, number> }>;
 };
 
 const LEVELS = ["explicit", "deductive", "inductive", "contradiction"] as const;
@@ -48,6 +50,8 @@ export function computeMemoryStats(
   let oldest: string | null = null;
   let newest: string | null = null;
   const perDay = new Map<string, number>();
+  const perDayByLevel = new Map<string, Record<string, number>>();
+  const perDayByObserver = new Map<string, Record<string, number>>();
 
   for (const conclusion of conclusions) {
     byLevel.set(conclusion.level, (byLevel.get(conclusion.level) ?? 0) + 1);
@@ -60,22 +64,27 @@ export function computeMemoryStats(
       if (oldest === null || conclusion.created_at < oldest) oldest = conclusion.created_at;
       if (newest === null || conclusion.created_at > newest) newest = conclusion.created_at;
       perDay.set(dateKey, (perDay.get(dateKey) ?? 0) + 1);
+      const levelBucket = perDayByLevel.get(dateKey) ?? {};
+      levelBucket[conclusion.level] = (levelBucket[conclusion.level] ?? 0) + 1;
+      perDayByLevel.set(dateKey, levelBucket);
+      if (conclusion.observer_id) {
+        const observerBucket = perDayByObserver.get(dateKey) ?? {};
+        observerBucket[conclusion.observer_id] = (observerBucket[conclusion.observer_id] ?? 0) + 1;
+        perDayByObserver.set(dateKey, observerBucket);
+      }
     }
   }
 
   const daily: Array<{ date: string; count: number }> = [];
-  if (newest) {
-    const newestDay = new Date(`${utcDateKey(newest)}T00:00:00Z`);
-    for (let offset = DAILY_WINDOW_DAYS - 1; offset >= 0; offset -= 1) {
-      const day = new Date(newestDay.getTime() - offset * 86_400_000);
-      const key = day.toISOString().slice(0, 10);
-      daily.push({ date: key, count: perDay.get(key) ?? 0 });
-    }
-  } else {
-    for (let offset = DAILY_WINDOW_DAYS - 1; offset >= 0; offset -= 1) {
-      const day = new Date(Date.now() - offset * 86_400_000);
-      daily.push({ date: day.toISOString().slice(0, 10), count: 0 });
-    }
+  const dailyByLevel: Array<{ date: string; levels: Record<string, number> }> = [];
+  const dailyByObserver: Array<{ date: string; observers: Record<string, number> }> = [];
+  const windowAnchor = newest ? new Date(`${utcDateKey(newest)}T00:00:00Z`) : new Date();
+  for (let offset = DAILY_WINDOW_DAYS - 1; offset >= 0; offset -= 1) {
+    const day = new Date(windowAnchor.getTime() - offset * 86_400_000);
+    const key = day.toISOString().slice(0, 10);
+    daily.push({ date: key, count: perDay.get(key) ?? 0 });
+    dailyByLevel.push({ date: key, levels: perDayByLevel.get(key) ?? {} });
+    dailyByObserver.push({ date: key, observers: perDayByObserver.get(key) ?? {} });
   }
 
   return {
@@ -89,5 +98,7 @@ export function computeMemoryStats(
     oldest,
     newest,
     daily,
+    dailyByLevel,
+    dailyByObserver,
   };
 }

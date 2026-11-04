@@ -8,9 +8,15 @@ What you get:
 
 - Connection health with peer, memory, and session totals, plus workspace discovery from the credential's permissions
 - Browse conclusions progressively as you scroll, with explicit Load more and Load all controls, plus filters and separate semantic search
+- Memory triage: server-side detection of near-duplicate conclusions with confirmed, journaled cleanup
+- Growth breakdown: last-30-days conclusion counts by reasoning level and observer, rendered without a charting dependency
 - Create, replace (create-then-delete with rollback), and delete conclusions; destructive actions require explicit confirmation
 - Peer cards: view the representation and edit the card itself
-- Recent sessions and their messages, read-only
+- Session context: the assembled "injected view" (summary, representation, peer card, message window) for a selected session
+- Recent sessions and their messages, read-only, with stored summaries
+- Dialectic question answering with optional streaming answers
+- Journal viewer with action filters and NDJSON export
+- Scope-aware views (membership and backfill status) and a read-only webhook audit listing, when the Honcho server exposes them (v3.5+)
 
 ## Quickstart
 
@@ -64,7 +70,7 @@ The original host-side flow (`npm run dev`) remains supported and still binds
 
 ## Status
 
-A personal project, built in September 2026, running against a local Honcho container. Remote Honcho endpoints, authentication for multiple browser users, direct database access, bulk deletion, and deployment are deliberately out of scope; see `docs/BOUNDARIES.md` for the full threat model.
+A personal project, built in September 2026, running against a local Honcho container. Version 0.2.0 (November 2026) targets Honcho v3.5: session context, scopes, and webhook endpoints require the upgraded server. Remote Honcho endpoints, authentication for multiple browser users, direct database access, bulk deletion, and deployment are deliberately out of scope; see `docs/BOUNDARIES.md` for the full threat model.
 
 ## Documentation
 

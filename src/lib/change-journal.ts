@@ -21,6 +21,7 @@ export type ChangeJournalEntry = {
 const MAX_SUMMARY_LENGTH = 300;
 const MAX_CONTENT_LENGTH = 20_000;
 const MAX_ENTRIES_RETURNED = 200;
+const MAX_EXPORT_RETURNED = 5_000;
 
 export function journalPath(): string {
   return process.env.HONCHO_CONSOLE_JOURNAL_PATH
@@ -56,6 +57,21 @@ export async function recordChange(
 
 export async function readChanges(limit = 50): Promise<ChangeJournalEntry[]> {
   const boundedLimit = Math.min(Math.max(1, Math.trunc(limit)), MAX_ENTRIES_RETURNED);
+  return (await readAllEntries()).slice(-boundedLimit);
+}
+
+export async function readChangesFiltered(options: { limit?: number; action?: ChangeJournalAction; workspace?: string } = {}): Promise<ChangeJournalEntry[]> {
+  const boundedLimit = Math.min(Math.max(1, Math.trunc(options.limit ?? 200)), MAX_EXPORT_RETURNED);
+  const all = await readAllEntries();
+  const filtered = all.filter((entry) => {
+    if (options.action !== undefined && entry.action !== options.action) return false;
+    if (options.workspace !== undefined && entry.workspace !== options.workspace) return false;
+    return true;
+  });
+  return filtered.slice(-boundedLimit);
+}
+
+async function readAllEntries(): Promise<ChangeJournalEntry[]> {
   let raw: string;
   try {
     raw = await readFile(journalPath(), "utf8");
@@ -75,5 +91,5 @@ export async function readChanges(limit = 50): Promise<ChangeJournalEntry[]> {
       // Tolerate a corrupted or partially written line rather than failing the read.
     }
   }
-  return entries.slice(-boundedLimit);
+  return entries;
 }

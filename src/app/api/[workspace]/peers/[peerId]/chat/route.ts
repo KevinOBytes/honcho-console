@@ -9,6 +9,7 @@ const chatSchema = z.object({
   target: z.string().trim().max(512).optional().refine((value) => value === undefined || /^[a-zA-Z0-9_-]{1,512}$/.test(value), "Invalid target identifier."),
   session_id: z.string().trim().max(512).optional().refine((value) => value === undefined || /^[a-zA-Z0-9_-]{1,512}$/.test(value), "Invalid session identifier."),
   reasoning_level: z.enum(REASONING_LEVELS).optional(),
+  stream: z.boolean().optional(),
 });
 
 export async function POST(
@@ -21,6 +22,23 @@ export async function POST(
     const peerId = parseResourceId(params.peerId, "peer");
     const input = chatSchema.parse(await request.json());
     const { client } = await getHonchoClient();
+    if (input.stream === true) {
+      const upstream = await client.chatWithPeer(workspace, peerId, {
+        query: input.query,
+        target: input.target,
+        sessionId: input.session_id,
+        reasoningLevel: input.reasoning_level,
+        stream: true,
+      });
+      if (!(upstream instanceof Response)) {
+        throw new Error("The Honcho server returned a non-stream response for a streaming request.");
+      }
+      const headers = new Headers();
+      headers.set("Content-Type", upstream.headers.get("content-type") ?? "text/event-stream; charset=utf-8");
+      headers.set("Cache-Control", "no-cache, no-transform");
+      headers.set("X-Accel-Buffering", "no");
+      return new NextResponse(upstream.body, { status: 200, headers });
+    }
     const answer = await client.chatWithPeer(workspace, peerId, {
       query: input.query,
       target: input.target,

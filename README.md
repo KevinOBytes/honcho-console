@@ -34,6 +34,28 @@ Open `http://127.0.0.1:3000`. By default the server reads the existing Honcho co
 
 Honcho does not expose an in-place conclusion update endpoint. Replace creates the corrected conclusion first and deletes the old conclusion only after creation succeeds; the server attempts rollback if deletion fails.
 
+## Run inside the Honcho compose stack
+
+The Honcho stack's `docker-compose.yml` can host the console as a fifth `console`
+service (requires `~/.dockerignore`-aware multi-stage build from this repo's
+`Dockerfile`). It publishes `127.0.0.1:3100` only and reaches the API on the
+compose network as `http://api:8000`. Because that hostname is not loopback, the
+container runs with `HONCHO_ALLOW_REMOTE=true` (the operator opt-in defined in
+`BOUNDARIES.md`); the UI shows "Remote mode enabled" as a result. The
+workspace JWT is passed via `env_file` from a chmod-600 file and stays
+server-side. The change journal persists on the `console-journal` volume.
+
+```bash
+# one-time secret (from your existing ~/.honcho/config.json)
+#   echo "HONCHO_API_KEY=$(jq -r '.hosts.hermes.api_key' ~/.honcho/config.json)" > ~/Server/honcho/.console.env
+#   chmod 600 ~/Server/honcho/.console.env
+cd ~/Server/honcho && docker compose up -d --build console
+# open http://127.0.0.1:3100
+```
+
+The original host-side flow (`npm run dev`) remains supported and still binds
+`127.0.0.1`.
+
 ## Validation
 
     npm run check

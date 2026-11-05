@@ -13,7 +13,7 @@ export async function GET(
     const scopes = await client.listAllScopes(workspace);
     return NextResponse.json({
       workspace,
-      scopes: scopes.items.map(({ id, created_at, session_count }) => ({ id, created_at, session_count })),
+      scopes: scopes.items.map(({ id, created_at, session_count, metadata }) => ({ id, created_at, session_count, metadata })),
       total: scopes.total,
       truncated: scopes.truncated,
     });

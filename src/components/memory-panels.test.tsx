@@ -138,7 +138,7 @@ describe("ScopesView", () => {
   it("lists scopes and shows membership for a selected scope", async () => {
     handleWith({
       "/api/oasis/scopes": () => jsonResponse({
-        scopes: [{ id: "support", created_at: "2026-09-05T12:00:00Z", session_count: 1 }],
+        scopes: [{ id: "support", created_at: "2026-09-05T12:00:00Z", session_count: null, metadata: { purpose: "tier-1 support" } }],
         total: 1,
         truncated: false,
       }),
@@ -153,9 +153,12 @@ describe("ScopesView", () => {
     render(<ScopesView workspace="oasis" />);
 
     await screen.findByText("support");
+    expect(screen.getByText(/tier-1 support/)).toBeTruthy();
+    expect(screen.getByText(/count unknown/)).toBeTruthy();
     fireEvent.click(screen.getByText("support"));
     await screen.findByText("session-9");
     expect(screen.getByText(/completed/)).toBeTruthy();
+    expect(screen.getByText(/5 docs/)).toBeTruthy();
   });
 });
 

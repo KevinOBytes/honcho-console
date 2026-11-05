@@ -57,6 +57,12 @@ import { GrowthChart, ScopesView, SessionContextPanel, TriagePanel, WebhooksView
 type Section = "overview" | "memories" | "peers" | "sessions" | "search" | "scopes" | "webhooks";
 type Level = "all" | Conclusion["level"];
 
+const SECTION_IDS: Section[] = ["overview", "memories", "peers", "sessions", "search", "scopes", "webhooks"];
+
+export function parseSectionParam(value: string | null): Section {
+  return SECTION_IDS.includes(value as Section) ? (value as Section) : "overview";
+}
+
 // Mirrors REASONING_LEVELS from the server-side Honcho client (client components
 // must not import server-only modules, so the choices are restated here).
 const REASONING_LEVEL_CHOICES: ReasoningLevel[] = ["minimal", "low", "medium", "high", "max"];
@@ -222,6 +228,13 @@ export function HonchoDashboard() {
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sessionFocus, setSessionFocus] = useState({ nonce: 0, sessionId: "" });
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setActiveSection(parseSectionParam(new URLSearchParams(window.location.search).get("section")));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const openSession = useCallback((sessionId: string) => {
     setSessionFocus((current) => ({ nonce: current.nonce + 1, sessionId }));

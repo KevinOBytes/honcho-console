@@ -15,7 +15,7 @@ const mockedGetHonchoClient = vi.mocked(getHonchoClient);
 
 const page = {
   items: [
-    { id: "support", metadata: {}, created_at: "2026-09-05T12:00:00Z", session_count: 3 },
+    { id: "support", metadata: { purpose: "tier-1 support" }, created_at: "2026-09-05T12:00:00Z", session_count: 3 },
     { id: "lab", metadata: {}, created_at: "2026-09-06T12:00:00Z", session_count: null },
   ],
   total: 2,
@@ -40,8 +40,8 @@ describe("GET /api/[workspace]/scopes", () => {
     await expect(response.json()).resolves.toEqual({
       workspace: "oasis",
       scopes: [
-        { id: "support", created_at: "2026-09-05T12:00:00Z", session_count: 3 },
-        { id: "lab", created_at: "2026-09-06T12:00:00Z", session_count: null },
+        { id: "support", created_at: "2026-09-05T12:00:00Z", session_count: 3, metadata: { purpose: "tier-1 support" } },
+        { id: "lab", created_at: "2026-09-06T12:00:00Z", session_count: null, metadata: {} },
       ],
       total: 2,
       truncated: false,

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { HonchoDashboard } from "./honcho-dashboard";
+import { HonchoDashboard, parseSectionParam } from "./honcho-dashboard";
 
 const peers = [
   {
@@ -619,5 +619,20 @@ describe("HonchoDashboard progressive memory browsing", () => {
     await screen.findByText("Memory 2");
     expect(screen.getAllByText("Memory 1")).toHaveLength(1);
     expect(screen.getByText(/2 of 3 loaded/)).toBeInTheDocument();
+  });
+});
+
+describe("parseSectionParam", () => {
+  it("accepts every known section id", () => {
+    for (const id of ["overview", "memories", "peers", "sessions", "search", "scopes", "webhooks"]) {
+      expect(parseSectionParam(id)).toBe(id);
+    }
+  });
+
+  it("falls back to overview for unknown or missing values", () => {
+    expect(parseSectionParam("bogus")).toBe("overview");
+    expect(parseSectionParam(null)).toBe("overview");
+    expect(parseSectionParam("SCOPES")).toBe("overview");
+    expect(parseSectionParam("")).toBe("overview");
   });
 });

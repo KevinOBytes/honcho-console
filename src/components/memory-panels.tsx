@@ -331,7 +331,8 @@ export function GrowthChart({ dailyByLevel = [], dailyByObserver = [] }: { daily
 // F7: Scopes (read-only membership + status)
 // ---------------------------------------------------------------------------
 
-type ScopeInfo = { id: string; created_at: string; session_count: number | null };
+type ScopeInfo = { id: string; created_at: string; session_count: number | null; metadata?: Record<string, unknown> };
+type ScopeBackfillEntry = { state?: string; docs_copied?: number };
 type ScopeDetail = {
   scope: ScopeInfo | null;
   sessions: Array<{ id: string; is_active: boolean; created_at: string }>;
@@ -383,8 +384,11 @@ export function ScopesView({ workspace }: { workspace: string }) {
             {scopes?.map((scope) => (
               <button className={`session-list-row ${selectedId === scope.id ? "session-selected" : ""}`} type="button" key={scope.id} onClick={() => void loadDetail(scope.id)}>
                 <span className="session-pip session-live" />
-                <span className="session-list-copy"><strong>{scope.id}</strong><small>{formatDate(scope.created_at)}</small></span>
-                <span className="mono">{scope.session_count ?? "?"} sessions</span>
+                <span className="session-list-copy">
+                  <strong>{scope.id}</strong>
+                  <small>{formatDate(scope.created_at)}{typeof scope.metadata?.purpose === "string" ? ` · ${scope.metadata.purpose}` : ""}</small>
+                </span>
+                <span className="mono">{scope.session_count === null ? "count unknown" : `${scope.session_count} sessions`}</span>
               </button>
             ))}
             {scopes && scopes.length === 0 ? <span className="muted journal-empty">No scopes exist in this workspace.</span> : null}
@@ -395,7 +399,7 @@ export function ScopesView({ workspace }: { workspace: string }) {
           {detail ? (
             <>
               {detail.sessions.length > 0 ? <div className="mini-session-list">{detail.sessions.map((session) => <div className="mini-session" key={session.id}><span className={`session-pip ${session.is_active ? "session-live" : ""}`} /><div><strong>{compactId(session.id, 24)}</strong><span>{formatDate(session.created_at)}</span></div><span className="mono">{session.is_active ? "ACTIVE" : "CLOSED"}</span></div>)}</div> : <span className="muted journal-empty">No sessions are members of this scope.</span>}
-              <div className="muted stats-note">Backfill status: {Object.keys(detail.status.backfill_status).length > 0 ? Object.entries(detail.status.backfill_status).map(([session, state]) => `${compactId(session, 10)}: ${String((state as { state?: string }).state ?? "unknown")}`).join(" · ") : "no backfill jobs recorded"}</div>
+              <div className="muted stats-note">Backfill status: {Object.keys(detail.status.backfill_status).length > 0 ? Object.entries(detail.status.backfill_status).map(([session, state]) => { const entry = state as ScopeBackfillEntry; return `${compactId(session, 10)}: ${entry.state ?? "unknown"}${typeof entry.docs_copied === "number" ? ` (${entry.docs_copied} docs)` : ""}`; }).join(" · ") : "no backfill jobs recorded"}</div>
             </>
           ) : <span className="muted journal-empty">Choose a scope to inspect its sessions and backfill state.</span>}
         </div>

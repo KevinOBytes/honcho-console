@@ -29,7 +29,7 @@ describe("GET /api/[workspace]/scopes/[scopeId]", () => {
   beforeEach(() => {
     client = {
       listAllScopes: vi.fn().mockResolvedValue({
-        items: [{ id: "support", metadata: {}, created_at: "2026-09-05T12:00:00Z", session_count: 1 }],
+        items: [{ id: "support", metadata: { purpose: "tier-1 support" }, created_at: "2026-09-05T12:00:00Z", session_count: 1 }],
         total: 1,
         truncated: false,
       }),
@@ -46,6 +46,7 @@ describe("GET /api/[workspace]/scopes/[scopeId]", () => {
     expect(response.status).toBe(200);
     const payload = await response.json();
     expect(payload.scope?.id).toBe("support");
+    expect(payload.scope?.metadata).toEqual({ purpose: "tier-1 support" });
     expect(payload.sessions).toEqual([{ id: "s1", is_active: true, created_at: "2026-09-04T12:00:00Z" }]);
     expect(payload.status.backfill_status.s1.state).toBe("completed");
     expect(client.listScopeSessions).toHaveBeenCalledWith("oasis", "support", 1, 100);

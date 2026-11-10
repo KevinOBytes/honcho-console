@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 const baseUrl = process.env.HONCHO_UI_URL ?? "http://127.0.0.1:3000";
 const workspace = process.env.HONCHO_UI_WORKSPACE ?? "oasis";
 
@@ -61,15 +65,49 @@ const invalidDream = await fetch(`${baseUrl}/api/${encodeURIComponent(workspace)
 });
 if (invalidDream.status !== 400) throw new Error(`invalid dream should be rejected with 400, got ${invalidDream.status}`);
 
-const serialized = JSON.stringify({ status, overview, memories, peers, sessions, context, messages, semantic, stats, journal, queue, summaries, messageSearch }).toLowerCase();
 if (semantic && semantic.mode !== "semantic") throw new Error("semantic search did not return semantic mode");
 if (semantic && semantic.size < 1) throw new Error("semantic search returned an invalid page size");
 if (stats.stats.totalAvailable < 0 || stats.queue.pending_work_units < 0) throw new Error("stats payload failed invariant checks");
 if (!Array.isArray(journal.items)) throw new Error("journal did not return an items array");
 if (summaries.id !== sessionId) throw new Error("summaries did not echo the session id");
 
-for (const secretMarker of ["bearer ", "api_key", "apikey", "jwt_secret"]) {
-  if (serialized.includes(secretMarker)) throw new Error(`possible credential marker leaked in UI API responses: ${secretMarker}`);
+// Memories, messages, cards, and summaries are user text and may legitimately mention words such as
+// "api_key" or "bearer". Marker words are therefore checked only against structural fields, while the
+// actual configured key value is checked against every response, user text included.
+const USER_TEXT_KEYS = new Set(["content", "representation", "peer_representation", "peer_card", "summary", "before", "after"]);
+function structuralOnly(value) {
+  if (Array.isArray(value)) return value.map(structuralOnly);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !USER_TEXT_KEYS.has(key)).map(([key, inner]) => [key, structuralOnly(inner)]));
+  }
+  return value;
+}
+function findKey(value) {
+  if (!value || typeof value !== "object") return undefined;
+  for (const [key, inner] of Object.entries(value)) {
+    if ((key === "apiKey" || key === "api_key") && typeof inner === "string") return inner;
+    const nested = findKey(inner);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+function configuredApiKey() {
+  if (process.env.HONCHO_API_KEY) return process.env.HONCHO_API_KEY;
+  try {
+    return findKey(JSON.parse(readFileSync(process.env.HONCHO_CONFIG_PATH ?? join(homedir(), ".honcho", "config.json"), "utf8")));
+  } catch {
+    return undefined;
+  }
+}
+
+const responses = { status, overview, memories, peers, sessions, context, messages, semantic, stats, journal, queue, summaries, messageSearch };
+const structural = JSON.stringify(structuralOnly(responses)).toLowerCase();
+for (const secretMarker of ["bearer ", "api_key", "apikey", "jwt_secret", "authorization"]) {
+  if (structural.includes(secretMarker)) throw new Error(`possible credential marker leaked in UI API response fields: ${secretMarker}`);
+}
+const apiKey = configuredApiKey();
+if (apiKey && apiKey.length >= 16 && (JSON.stringify(responses).includes(apiKey) || exportText.includes(apiKey))) {
+  throw new Error("the configured Honcho API key value appeared in a UI API response");
 }
 
 console.log(JSON.stringify({
@@ -85,4 +123,5 @@ console.log(JSON.stringify({
   statsTotal: stats.stats.totalAvailable,
   messageSearchHits: messageSearch.items.length,
   exportBytes: exportText.length,
+  exactKeyChecked: Boolean(apiKey && apiKey.length >= 16),
 }));

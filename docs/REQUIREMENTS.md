@@ -2,7 +2,7 @@
 document_id: requirements
 status: current
 owner: Kevin O'Connor
-last_reviewed: 2026-09-04
+last_reviewed: 2026-11-09
 review_interval_days: 90
 ---
 
@@ -82,7 +82,7 @@ The UI shall list peers, retrieve observer-to-target representations and context
 **Status:** Accepted
 **Priority:** Must
 
-The UI shall list recent sessions and display a selected session's paginated messages without exposing controls that mutate conversation history.
+The UI shall list recent sessions and display a selected session's paginated messages without exposing controls that edit individual messages. Session deletion is governed by REQ-SESSION-004.
 
 #### Acceptance criteria
 - Session totals and page state reflect the Honcho response.
@@ -331,12 +331,74 @@ A Scopes section shall list the workspace scopes with membership and backfill st
 **Status:** Accepted
 **Priority:** Should
 
-A Webhooks section shall list the configured outbound webhook endpoints for the workspace, read-only.
+A Webhooks section shall list the configured outbound webhook endpoints for the workspace. Deletion is governed by REQ-MGMT-001.
 
 #### Acceptance criteria
 - Listing comes from a same-origin route backed by `GET /v3/.../webhooks`.
 - Endpoint URL, identifier, and creation time are shown; an empty workspace shows an explicit empty state.
-- Creating, testing, or deleting endpoints is not exposed; no credentials or signed payloads are fetched or rendered.
+- Creating or testing endpoints is not exposed; no credentials or signed payloads are fetched or rendered.
 
 #### Verification
 - Route test and component test for populated and empty states.
+
+### REQ-MEM-010 — Text search and multi-select memory deletion
+
+**Status:** Accepted
+**Priority:** Must
+
+The memory browser shall filter conclusions by a case-insensitive text match on content (server-side Honcho `icontains`, combinable with observer, observed, session, and level filters), and let the operator select conclusions with per-row checkboxes, a header checkbox that selects every loaded row, and a "select all N matching" action, then delete the selection in confirmed batches.
+
+#### Acceptance criteria
+- The text filter is bounded to 500 characters, validated server-side, and keeps chronological progressive loading.
+- The header checkbox checks every loaded row, clears them when all are checked, and shows an indeterminate state for a partial selection. Row checkboxes never open the editor.
+- "Select all matching" collects ids through a read-only route capped at 20,000 and states when the cap truncates the selection.
+- Deletion requires typing `DELETE` in a dialog showing the count and previews; it runs in batches of 100 with progress, Stop between batches, and a result listing per-id failures. Failed and unattempted ids stay selected.
+- After deletion the list reloads page one with the active filters intact; the workspace counts refresh without remounting the view.
+
+#### Verification
+- `src/lib/bulk-delete.test.ts`, `src/lib/bulk-client.test.ts`, route tests for `memories/bulk-delete`, `memories/ids`, and the `contains` filter, and `src/components/bulk-management.test.tsx`.
+- Live browser run deleting temporary marked conclusions, with change-journal entries read back.
+
+### REQ-SESSION-004 — Session search and deletion
+
+**Status:** Accepted
+**Priority:** Must
+
+The session archive shall search sessions by id substring and delete one or many sessions through `DELETE /v3/.../sessions/{id}`.
+
+#### Acceptance criteria
+- Session rows carry checkboxes, the page has a select-all checkbox and a "select all N matching" action, and the selected session has a Delete action.
+- The confirmation dialog states that Honcho removes messages asynchronously and also deletes conclusions stored against the session ids.
+- A search that hides the session shown in the detail pane clears that pane, so its Delete action cannot target a session the list no longer shows.
+- Each deleted session is journaled as `session-delete`.
+
+#### Verification
+- Session management route tests, client tests for the 202 Accepted reply, component tests, and a live deletion of a temporary empty session.
+
+### REQ-PEER-006 — Peer memory purge
+
+**Status:** Accepted
+**Priority:** Should
+
+The peers view shall let the operator search peers, select them with checkboxes, and purge their memory: delete every conclusion where the peer is observer or observed, then replace the peer's own card and the loaded peers' cards about it (up to 100 observers) with empty cards.
+
+#### Acceptance criteria
+- Each listed peer (up to 50) shows its conclusion counts as observer and observed.
+- Purge requires typing `PURGE`, reports progress and failures, and states that the peer id, sessions, and messages remain because Honcho has no peer-delete endpoint.
+
+#### Verification
+- Component test asserting both id queries, bulk deletion, and the empty card writes; a live dialog preview (cancelled) against real peers.
+
+### REQ-MGMT-001 — Webhook endpoint deletion
+
+**Status:** Accepted
+**Priority:** Should
+
+The webhooks view shall let the operator select endpoints with checkboxes and delete them after typing `DELETE`, journaling each deletion as `webhook-delete`.
+
+#### Acceptance criteria
+- Endpoint ids are validated before the upstream `DELETE /v3/.../webhooks/{id}` call.
+- The dialog previews the endpoint URLs being deleted; failures are reported per endpoint and stay selected.
+
+#### Verification
+- Route test for `DELETE /api/[workspace]/webhooks/[endpointId]` and a component test for the confirmed flow.

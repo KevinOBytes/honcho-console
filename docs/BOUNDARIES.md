@@ -2,7 +2,7 @@
 document_id: boundaries
 status: current
 owner: Kevin O'Connor
-last_reviewed: 2026-09-04
+last_reviewed: 2026-11-09
 review_interval_days: 90
 ---
 
@@ -13,7 +13,7 @@ These `BOUNDARY-*` statements are hard constraints. Do not weaken one to simplif
 ## Product scope and non-goals
 
 - BOUNDARY-SCOPE-001: The product is a single-user, local-only Honcho inspection and curation console.
-- BOUNDARY-SCOPE-002: Remote deployment, multi-user authentication, workspace administration, direct database editing, bulk deletion, and session/message mutation are non-goals.
+- BOUNDARY-SCOPE-002: Remote deployment, multi-user authentication, workspace administration (including workspace deletion), direct database editing, message editing, and creation of sessions, peers, or webhooks are non-goals. Deleting conclusions (single or bulk), sessions, and webhook endpoints, and purging a peer's conclusions and cards, are in scope under BOUNDARY-OPS-007 (approved by Kevin O'Connor, 2026-11-09).
 - BOUNDARY-SCOPE-003: “Memory” means Honcho conclusions and peer cards; generated representations are inspectable but not directly editable.
 
 ## Trust boundaries
@@ -59,10 +59,12 @@ These `BOUNDARY-*` statements are hard constraints. Do not weaken one to simplif
 
 - BOUNDARY-OPS-001: The app does not start, stop, repair, or reconfigure Honcho containers.
 - BOUNDARY-OPS-002: A disconnected app remains read-only except for retrying connection; it must not synthesize mock records that look real.
-- BOUNDARY-OPS-003: Delete and replace actions require an explicit confirmation in the current browser interaction.
+- BOUNDARY-OPS-003: Delete and replace actions require an explicit confirmation in the current browser interaction. Multi-item deletion, session deletion, webhook deletion, and peer purge require typing a confirmation word (`DELETE` or `PURGE`) in a dialog that names the count and previews the affected items.
 - BOUNDARY-OPS-004: Dialectic chat and representation requests are read-only deriver queries. The console must never send a persistence flag or persist the generated answer, and generated text must always be labeled as a derived view.
 - BOUNDARY-OPS-005: Dream scheduling is the only console-triggered deriver job. It requires an explicit confirmation dialog in the current browser interaction, a server-validated `dream_type` (`omni` or `card_refresh`), and a plainly stated warning that it triggers real server-side derivation work. Any additional dream types or automatic/periodic scheduling require explicit approval.
 - BOUNDARY-OPS-006: Composition statistics and the change journal are analysis features computed server-side from normal reads; they must not introduce new writes to Honcho.
+
+- BOUNDARY-OPS-007: Deletion uses only documented Honcho v3 DELETE endpoints (conclusions, sessions, webhook endpoints) plus the existing peer-card PUT. Bulk requests carry `confirm: true`, accept at most 100 validated ids each, run at most 4 upstream deletes concurrently, report per-id failures without aborting the batch, and journal each successful deletion. "Select all matching" id collection is read-only and capped at 20,000 ids. Peer purge never claims to delete the peer record, because Honcho exposes no peer-delete endpoint.
 
 ## Local artifacts boundaries
 
@@ -73,5 +75,5 @@ These `BOUNDARY-*` statements are hard constraints. Do not weaken one to simplif
 
 - Enabling remote or non-loopback access.
 - Adding authentication, a new external service, telemetry, or a production dependency.
-- Adding bulk mutation or any operation that changes sessions/messages/workspaces.
+- Any mutation beyond BOUNDARY-OPS-007, including workspace deletion, message editing, or new create/update operations on sessions, peers, or webhooks.
 - Editing the protected control plane or changing the project profile for deployment.

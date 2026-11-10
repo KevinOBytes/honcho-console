@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
+import { parseTextFilter } from "@/lib/bulk-delete";
 import { parseResourceId, parseWorkspaceId } from "@/lib/honcho-client";
 import { getHonchoClient } from "@/lib/server";
 import { recordChange } from "@/lib/change-journal";
@@ -72,7 +73,9 @@ export async function GET(
     let observer: string | undefined;
     let observed: string | undefined;
     let sessionId: string | undefined;
+    let contains: string | undefined;
     try {
+      contains = parseTextFilter(params.get("contains"));
       observer = observerParam ? parseResourceId(observerParam, "observer") : undefined;
       observed = observedParam ? parseResourceId(observedParam, "observed") : undefined;
       sessionId = sessionParam ? parseResourceId(sessionParam, "session") : undefined;
@@ -87,6 +90,7 @@ export async function GET(
         ...(observed ? { observed_id: observed } : {}),
         ...(sessionId ? { session_id: sessionId } : {}),
         ...(level ? { level } : {}),
+        ...(contains ? { contains } : {}),
       },
     });
     return NextResponse.json({ ...pageData, mode: "recent" });

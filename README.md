@@ -11,12 +11,14 @@ What you get:
 - Memory triage: server-side detection of near-duplicate conclusions with confirmed, journaled cleanup
 - Growth breakdown: last-30-days conclusion counts by reasoning level and observer, rendered without a charting dependency
 - Create, replace (create-then-delete with rollback), and delete conclusions; destructive actions require explicit confirmation
+- Text search over conclusion content plus checkbox multi-select (header select-all, select all matching) and batched bulk delete behind a typed `DELETE` confirmation
+- Peer memory purge: delete every conclusion a peer observed or is observed in, and clear its peer cards (Honcho has no peer-delete endpoint, so the peer id remains)
 - Peer cards: view the representation and edit the card itself
 - Session context: the assembled "injected view" (summary, representation, peer card, message window) for a selected session
-- Recent sessions and their messages, read-only, with stored summaries
+- Recent sessions and their messages with stored summaries; search sessions by id and delete one or many (Honcho removes their messages and session-scoped conclusions)
 - Dialectic question answering with optional streaming answers
 - Journal viewer with action filters and NDJSON export
-- Scope-aware views (membership and backfill status) and a read-only webhook audit listing, when the Honcho server exposes them (v3.5+)
+- Scope-aware views (membership and backfill status) and a webhook listing with confirmed endpoint deletion, when the Honcho server exposes them (v3.5+)
 
 ## Quickstart
 

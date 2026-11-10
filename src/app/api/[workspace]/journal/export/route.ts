@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { parseWorkspaceId } from "@/lib/honcho-client";
 import { readChangesFiltered, type ChangeJournalAction } from "@/lib/change-journal";
 
-const ACTIONS: ChangeJournalAction[] = ["create", "replace", "delete", "card-update", "dream"];
+const ACTIONS: ChangeJournalAction[] = ["create", "replace", "delete", "card-update", "dream", "session-delete", "webhook-delete"];
 
 function parseLimit(value: string | null): number {
   if (value === null) return 5_000;
@@ -26,7 +26,7 @@ export async function GET(
       ? undefined
       : ACTIONS.includes(actionValue as ChangeJournalAction)
         ? (actionValue as ChangeJournalAction)
-        : (() => { throw new Error("Journal export action must be one of: create, replace, delete, card-update, dream."); })();
+        : (() => { throw new Error(`Journal export action must be one of: ${ACTIONS.join(", ")}.`); })();
     const journalWorkspace = request.nextUrl.searchParams.get("workspace");
     if (journalWorkspace !== null && journalWorkspace !== "") {
       parseWorkspaceId(journalWorkspace);

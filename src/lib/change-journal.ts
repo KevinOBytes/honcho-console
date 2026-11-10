@@ -4,7 +4,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export type ChangeJournalAction = "create" | "replace" | "delete" | "card-update" | "dream";
+export type ChangeJournalAction = "create" | "replace" | "delete" | "card-update" | "dream" | "session-delete" | "webhook-delete";
 
 export type ChangeJournalEntry = {
   at: string;

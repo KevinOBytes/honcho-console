@@ -52,6 +52,8 @@ import type {
 import type { MemoryStats } from "@/lib/memory-stats";
 import { compactId, formatDate, jsonPreview } from "@/lib/format";
 import { streamResponseText } from "@/lib/stream-text";
+import { runChunkedBulkDelete, type ChunkedDeleteResult } from "@/lib/bulk-client";
+import { BulkDeleteDialog, RowCheckbox, MasterCheckbox, SelectionBar, useSelection, type BulkRunContext } from "./bulk-controls";
 import { GrowthChart, ScopesView, SessionContextPanel, TriagePanel, WebhooksView } from "./memory-panels";
 
 type Section = "overview" | "memories" | "peers" | "sessions" | "search" | "scopes" | "webhooks";
@@ -88,7 +90,7 @@ type WorkspacePayload = {
   conclusions: ConclusionPage;
   queue: { pending_work_units: number; total_work_units: number; completed_work_units: number; in_progress_work_units: number };
 };
-type RecentFilter = { observer_id?: string; observed_id?: string; session_id?: string };
+type RecentFilter = { observer_id?: string; observed_id?: string; session_id?: string; contains?: string };
 type PeerOptions = { items: Peer[]; total: number; page: number; size: number; pages: number };
 
 const PEER_OPTION_PAGE_SIZE = 100;
@@ -269,13 +271,14 @@ export function HonchoDashboard() {
     }
   }, []);
 
-  const loadWorkspace = useCallback(async (workspaceId: string) => {
+  const loadWorkspace = useCallback(async (workspaceId: string, options: { keepData?: boolean } = {}) => {
     if (!workspaceId) return;
     const requestId = ++workspaceRequestRef.current;
     selectedWorkspaceRef.current = workspaceId;
     setLoadingWorkspace(true);
     setWorkspaceError("");
-    setWorkspaceData(null);
+    // A soft refresh after a mutation keeps the current views mounted so their filters and selection survive.
+    if (!options.keepData) setWorkspaceData(null);
     try {
       const nextData = await requestJson<WorkspacePayload>(`/api/${encodeURIComponent(workspaceId)}`);
       if (requestId !== workspaceRequestRef.current || selectedWorkspaceRef.current !== workspaceId) return;
@@ -490,9 +493,9 @@ export function HonchoDashboard() {
           {workspace && workspaceData ? (
             <>
               {activeSection === "overview" ? <OverviewView data={workspaceData} workspace={workspace} activeSessionCount={activeSessionCount} queuePending={queuePending} onNavigate={setActiveSection} onOpenSession={openSession} /> : null}
-              {activeSection === "memories" ? <MemoriesView key={`${workspace}-${refreshGeneration}`} workspace={workspace} peers={peers} initialItems={recentMemories} initialTotal={workspaceData.conclusions.total} onChanged={() => { if (selectedWorkspaceRef.current === workspace) void loadWorkspace(workspace); }} onOpenSession={openSession} /> : null}
-              {activeSection === "peers" ? <PeersView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.peers} /> : null}
-              {activeSection === "sessions" ? <SessionsView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.sessions} focus={sessionFocus} /> : null}
+              {activeSection === "memories" ? <MemoriesView key={`${workspace}-${refreshGeneration}`} workspace={workspace} peers={peers} initialItems={recentMemories} initialTotal={workspaceData.conclusions.total} onChanged={() => { if (selectedWorkspaceRef.current === workspace) void loadWorkspace(workspace, { keepData: true }); }} onOpenSession={openSession} /> : null}
+              {activeSection === "peers" ? <PeersView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.peers} onChanged={() => { if (selectedWorkspaceRef.current === workspace) void loadWorkspace(workspace, { keepData: true }); }} /> : null}
+              {activeSection === "sessions" ? <SessionsView key={`${workspace}-${refreshGeneration}`} workspace={workspace} initialPage={workspaceData.sessions} focus={sessionFocus} onChanged={() => { if (selectedWorkspaceRef.current === workspace) void loadWorkspace(workspace, { keepData: true }); }} /> : null}
               {activeSection === "search" ? <GlobalSearchView workspace={workspace} onOpenSession={openSession} /> : null}
               {activeSection === "scopes" ? <ScopesView key={`${workspace}-${refreshGeneration}`} workspace={workspace} /> : null}
               {activeSection === "webhooks" ? <WebhooksView key={`${workspace}-${refreshGeneration}`} workspace={workspace} /> : null}
@@ -761,6 +764,8 @@ function RecentChangesPanel({ workspace }: { workspace: string }) {
             <option value="delete">delete</option>
             <option value="card-update">card-update</option>
             <option value="dream">dream</option>
+            <option value="session-delete">session-delete</option>
+            <option value="webhook-delete">webhook-delete</option>
           </select>
           <a className="text-button journal-export" href={`/api/${encodeURIComponent(workspace)}/journal/export${action === "all" ? "" : `?action=${encodeURIComponent(action)}`}`} download>Export <Download size={14} aria-hidden="true" /></a>
         </div>
@@ -826,11 +831,13 @@ function ExportPanel({ workspace }: { workspace: string }) {
   );
 }
 
-function MemoryTable({ items, compact = false, onSelect, onOpenSession }: { items: Conclusion[]; compact?: boolean; onSelect: (item: Conclusion) => void; onOpenSession?: (sessionId: string) => void }) {
+type TableSelection = { selected: Set<string>; onToggle: (id: string) => void; onToggleAll: () => void };
+
+function MemoryTable({ items, compact = false, onSelect, onOpenSession, selection }: { items: Conclusion[]; compact?: boolean; onSelect: (item: Conclusion) => void; onOpenSession?: (sessionId: string) => void; selection?: TableSelection }) {
   const interactiveRows = Boolean(onOpenSession) && !compact;
   return (
-    <div className={`memory-table ${compact ? "memory-table-compact" : ""}`}>
-      <div className="memory-table-head"><span>Memory</span><span>Relationship</span><span>Level</span><span>Created</span></div>
+    <div className={`memory-table ${compact ? "memory-table-compact" : ""} ${selection ? "memory-table-selectable" : ""}`}>
+      <div className="memory-table-head">{selection ? <span className="select-cell"><MasterCheckbox visibleIds={items.map((item) => item.id)} selected={selection.selected} onToggleAll={selection.onToggleAll} label="Select all loaded memories" /></span> : null}<span>Memory</span><span>Relationship</span><span>Level</span><span>Created</span></div>
       {items.map((item) => {
         const rowProps = interactiveRows
           ? {
@@ -847,11 +854,12 @@ function MemoryTable({ items, compact = false, onSelect, onOpenSession }: { item
           : {};
         return (
           <div
-            className="memory-row"
+            className={`memory-row ${selection?.selected.has(item.id) ? "memory-row-selected" : ""}`}
             key={item.id}
             onClick={() => onSelect(item)}
             {...rowProps}
           >
+            {selection ? <span className="select-cell"><RowCheckbox checked={selection.selected.has(item.id)} onToggle={() => selection.onToggle(item.id)} label={`Select memory ${item.id}`} /></span> : null}
             <span className="memory-copy"><strong>{item.content}</strong><small className="mono">{compactId(item.id, 18)}{!compact && item.session_id && onOpenSession ? <button className="session-link mono" type="button" aria-label={`Open session ${item.session_id}`} onClick={(event) => { event.stopPropagation(); onOpenSession(item.session_id!); }}> · {compactId(item.session_id, 16)}</button> : null}</small></span>
             <span className="relationship"><span>{compactId(item.observer_id, 13)}</span><ArrowRight size={13} aria-hidden="true" /><span>{compactId(item.observed_id, 13)}</span></span>
             <span><LevelBadge level={item.level} /></span>
@@ -887,6 +895,13 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
   const [browseObserved, setBrowseObserved] = useState("");
   const [browseSession, setBrowseSession] = useState("");
   const [sessionDraft, setSessionDraft] = useState("");
+  const [browseContains, setBrowseContains] = useState("");
+  const [containsDraft, setContainsDraft] = useState("");
+  const selection = useSelection();
+  const { clear: clearSelection } = selection;
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [selectingAll, setSelectingAll] = useState(false);
+  const [selectionNote, setSelectionNote] = useState("");
   const peerOptionsRequestRef = useRef(0);
 
   useEffect(() => {
@@ -930,7 +945,7 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
   const loadAllRunRef = useRef(0);
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
-  const load = useCallback(async (nextPage: number, nextQuery = query, nextLevel = level, filters: RecentFilter = { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }, append = false): Promise<ConclusionPage | null> => {
+  const load = useCallback(async (nextPage: number, nextQuery = query, nextLevel = level, filters: RecentFilter = { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined, contains: browseContains || undefined }, append = false): Promise<ConclusionPage | null> => {
     const requestId = ++memoryRequestRef.current;
     memoryAbortRef.current?.abort();
     const controller = new AbortController();
@@ -946,6 +961,8 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
       setLoadingMore(false);
       setLoadingAll(false);
       setLoading(true);
+      clearSelection();
+      setSelectionNote("");
     } else {
       setLoadingMore(true);
     }
@@ -966,6 +983,7 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
         if (filters.observer_id) params.set("observer_id", filters.observer_id);
         if (filters.observed_id) params.set("observed_id", filters.observed_id);
         if (filters.session_id) params.set("session_id", filters.session_id);
+        if (filters.contains) params.set("contains", filters.contains);
       }
       const payload = await requestJson<ConclusionPage & { mode?: "recent" | "semantic" }>(`/api/${encodeURIComponent(workspace)}/memories?${params}`, { signal: controller.signal });
       if (requestId !== memoryRequestRef.current) return null;
@@ -996,9 +1014,9 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
         else setLoading(false);
       }
     }
-  }, [browseObserved, browseObserver, browseSession, level, query, searchObserved, searchObserver, workspace]);
+  }, [browseContains, browseObserved, browseObserver, browseSession, level, query, searchObserved, searchObserver, clearSelection, workspace]);
 
-  const currentFilters = useMemo(() => ({ observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }), [browseObserver, browseObserved, browseSession]);
+  const currentFilters = useMemo<RecentFilter>(() => ({ observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined, contains: browseContains || undefined }), [browseObserver, browseObserved, browseSession, browseContains]);
   const loadNext = useCallback(async (expectedGeneration?: number) => {
     if (expectedGeneration !== undefined && expectedGeneration !== memoryRequestRef.current) return;
     if (loadingMoreRef.current || listResetPendingRef.current || loading || !hasLoaded || pageData.page >= pageData.pages || query.trim()) return;
@@ -1091,10 +1109,70 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
     setSelected(item);
   };
 
+  const applyBrowseDrafts = () => {
+    const nextSession = sessionDraft.trim();
+    const nextContains = containsDraft.trim();
+    setBrowseSession(nextSession);
+    setBrowseContains(nextContains);
+    void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: nextSession || undefined, contains: nextContains || undefined });
+  };
+
+  const clearContains = () => {
+    setContainsDraft("");
+    setBrowseContains("");
+    void load(1, query, level, { ...currentFilters, contains: undefined });
+  };
+
+  const visibleIds = useMemo(() => pageData.items.map((item) => item.id), [pageData.items]);
+  const browseMode = pageData.mode !== "semantic" && !query.trim();
+  const [bulkIds, setBulkIds] = useState<string[] | null>(null);
+
+  const selectAllMatching = async () => {
+    setSelectingAll(true);
+    setSelectionNote("");
+    try {
+      const params = new URLSearchParams();
+      if (level !== "all") params.set("level", level);
+      for (const [key, value] of Object.entries(currentFilters)) if (value) params.set(key, value);
+      const payload = await requestJson<{ ids: string[]; total: number; truncated: boolean }>(`/api/${encodeURIComponent(workspace)}/memories/ids?${params}`);
+      selection.replace(payload.ids);
+      if (payload.truncated) setSelectionNote(`Selection capped at ${payload.ids.length.toLocaleString()} of ${payload.total.toLocaleString()} matching.`);
+    } catch (selectError) {
+      setSelectionNote(selectError instanceof Error ? selectError.message : "Unable to select every matching memory.");
+    } finally {
+      setSelectingAll(false);
+    }
+  };
+
+  const runMemoryBulk = (ids: string[]) => (context: BulkRunContext) => runChunkedBulkDelete({
+    url: `/api/${encodeURIComponent(workspace)}/memories/bulk-delete`,
+    ids,
+    onProgress: (done, total) => context.onProgress(done, total, "Deleting memories"),
+    shouldStop: context.shouldStop,
+  });
+
+  const finishMemoryBulk = async (result: ChunkedDeleteResult | null) => {
+    setBulkIds(null);
+    if (!result || (result.deleted.length === 0 && result.failed.length === 0)) return;
+    const keep = [...result.failed.map((failure) => failure.id), ...result.remaining];
+    // Reload page one: deletions shift Honcho's offsets, so appending later pages would skip records.
+    await load(1, query, level, currentFilters);
+    selection.replace(keep);
+    if (result.deleted.length) onChanged();
+  };
+
+  const bulkPreviews = (ids: string[]) => {
+    const byId = new Map(pageData.items.map((item) => [item.id, item]));
+    return ids.slice(0, 6).map((id) => {
+      const item = byId.get(id);
+      return item ? `${item.content.slice(0, 110)}${item.content.length > 110 ? "…" : ""}` : id;
+    });
+  };
+
   return (
     <div className="page-grid">
       <section className="section-intro">
-        <div><span className="eyebrow">CONCLUSIONS / {pageData.total.toLocaleString()} TOTAL</span><h2>Memory browser</h2><p>Chronological facts and derived observations stored for this workspace.</p></div>
+        <div><span className="eyebrow">CONCLUSIONS / {pageData.total.toLocaleString()} TOTAL</span><h2>Memory browser</h2><p>Search, select, and delete facts and derived observations stored for this workspace.</p></div>
         <button className="button button-primary" type="button" onClick={() => { setSelected(null); setShowNew(true); }}><Plus size={16} aria-hidden="true" /> Add memory</button>
       </section>
       <section className="panel toolbar-panel">
@@ -1109,21 +1187,35 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
             {peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}
           </select>
         </> : <>
-          <select className="select-control search-scope-control" value={browseObserver} onChange={(event) => { setBrowseObserver(event.target.value); void load(1, query, level, { observer_id: event.target.value || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }); }} aria-label="Filter recent memories by observer"><option value="">Any observer</option>{peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}</select>
-          <select className="select-control search-scope-control" value={browseObserved} onChange={(event) => { setBrowseObserved(event.target.value); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: event.target.value || undefined, session_id: browseSession || undefined }); }} aria-label="Filter recent memories by observed peer"><option value="">Any observed peer</option>{peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}</select>
-          <input className="text-input session-filter-input" value={sessionDraft} onChange={(event) => setSessionDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setBrowseSession(sessionDraft.trim()); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: sessionDraft.trim() || undefined }); } }} placeholder="session id" aria-label="Filter memories by session ID" />
-          {browseSession ? <button className="button button-quiet" type="button" onClick={() => { setBrowseSession(""); setSessionDraft(""); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined }); }}>Clear session</button> : null}
+          <select className="select-control search-scope-control" value={browseObserver} onChange={(event) => { setBrowseObserver(event.target.value); void load(1, query, level, { observer_id: event.target.value || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined, contains: browseContains || undefined }); }} aria-label="Filter recent memories by observer"><option value="">Any observer</option>{peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}</select>
+          <select className="select-control search-scope-control" value={browseObserved} onChange={(event) => { setBrowseObserved(event.target.value); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: event.target.value || undefined, session_id: browseSession || undefined, contains: browseContains || undefined }); }} aria-label="Filter recent memories by observed peer"><option value="">Any observed peer</option>{peerOptionItems.map((peer) => <option key={peer.id} value={peer.id}>{peer.id}</option>)}</select>
+          <input className="text-input session-filter-input" value={sessionDraft} onChange={(event) => setSessionDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { setBrowseSession(sessionDraft.trim()); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: sessionDraft.trim() || undefined, contains: browseContains || undefined }); } }} placeholder="session id" aria-label="Filter memories by session ID" />
+          {browseSession ? <button className="button button-quiet" type="button" onClick={() => { setBrowseSession(""); setSessionDraft(""); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, contains: browseContains || undefined }); }}>Clear session</button> : null}
+          <input className="text-input text-filter-input" value={containsDraft} onChange={(event) => setContainsDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyBrowseDrafts(); }} placeholder="text contains…" aria-label="Filter memories containing text" maxLength={500} />
+          {browseContains ? <button className="button button-quiet" type="button" onClick={clearContains}>Clear text</button> : null}
         </>}
-        <select className="select-control" value={level} onChange={(event) => { const next = event.target.value as Level; setLevel(next); void load(1, query, next, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }); }} aria-label="Filter by memory level">
+        <select className="select-control" value={level} onChange={(event) => { const next = event.target.value as Level; setLevel(next); void load(1, query, next, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined, contains: browseContains || undefined }); }} aria-label="Filter by memory level">
           <option value="all">All levels</option><option value="explicit">Explicit</option><option value="deductive">Deductive</option><option value="inductive">Inductive</option><option value="contradiction">Contradiction</option>
         </select>
-        <button className="button button-secondary" type="button" onClick={() => void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined })}><Search size={15} aria-hidden="true" /> Search</button>
-        <span className="toolbar-note"><Filter size={14} aria-hidden="true" /> {query ? "Semantic results · scoped to relationship" : "Newest first"}</span>
+        <button className="button button-secondary" type="button" onClick={() => { if (query.trim()) void load(1); else applyBrowseDrafts(); }}><Search size={15} aria-hidden="true" /> Search</button>
+        <span className="toolbar-note"><Filter size={14} aria-hidden="true" /> {query ? "Semantic results · scoped to relationship" : browseContains ? `Text contains "${browseContains}" · newest first` : "Newest first"}</span>
       </section>
       {error ? <ErrorBanner message={error} onRetry={() => { if (failedAppend && !query.trim()) void loadNext(); else void load(1, query, level, currentFilters); }} /> : null}
       <section className={`panel data-panel ${loading ? "panel-loading" : ""}`}>
         <div className="panel-heading"><div><span className="eyebrow">MEMORY LEDGER</span><h2>{listResetPending && error ? "Previous results" : pageData.mode === "semantic" ? "Search results" : "All conclusions"}</h2></div><span className="table-count">{pageData.total.toLocaleString()} records</span></div>
-        {loading ? <LoadingRows count={6} /> : pageData.items.length ? <MemoryTable items={pageData.items} onSelect={handleSelect} onOpenSession={onOpenSession} /> : <EmptyState icon={<Archive size={21} />} title="No matching memory" body="Try a broader query or remove the active level filter." />}
+        {!loading && pageData.items.length ? <SelectionBar
+          visibleIds={visibleIds}
+          selected={selection.selected}
+          onToggleAll={() => selection.toggleAll(visibleIds)}
+          masterLabel="Select all loaded memories"
+          onClear={() => { selection.clear(); setSelectionNote(""); }}
+          onDelete={() => setBulkIds([...selection.selected])}
+          matchingTotal={browseMode && !listResetPending ? pageData.total : undefined}
+          onSelectAllMatching={browseMode ? () => void selectAllMatching() : undefined}
+          selectingAll={selectingAll}
+          note={selectionNote || undefined}
+        /> : null}
+        {loading ? <LoadingRows count={6} /> : pageData.items.length ? <MemoryTable items={pageData.items} onSelect={handleSelect} onOpenSession={onOpenSession} selection={{ selected: selection.selected, onToggle: selection.toggle, onToggleAll: () => selection.toggleAll(visibleIds) }} /> : <EmptyState icon={<Archive size={21} />} title="No matching memory" body="Try a broader query or remove the active level filter." />}
         {hasLoaded && !listResetPending && pageData.mode !== "semantic" && !query.trim() ? <div className="memory-load-footer">
           <span className="memory-load-status" role="status">{pageData.items.length.toLocaleString()} of {pageData.total.toLocaleString()} loaded{loadingAll ? " · loading remaining pages" : ""}</span>
           {pageData.page >= pageData.pages && pageData.items.length < pageData.total ? <span className="memory-load-note">Some pages contained repeated records. Showing unique memories; the reported total is higher.</span> : null}
@@ -1138,7 +1230,16 @@ function MemoriesView({ workspace, peers, initialItems, initialTotal, onChanged,
         </div> : null}
       </section>
       {peerOptionsError ? <ErrorBanner message={peerOptionsError} /> : null}
-      {selected || showNew ? <MemoryEditor workspace={workspace} peers={peerOptionItems} selected={selected} onClose={() => { setSelected(null); setShowNew(false); }} onSaved={() => { setSelected(null); setShowNew(false); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined }); onChanged(); }} onOpenSession={onOpenSession} /> : null}
+      {bulkIds ? <BulkDeleteDialog
+        title={`Delete ${bulkIds.length.toLocaleString()} ${bulkIds.length === 1 ? "memory" : "memories"}`}
+        description="Each conclusion is deleted through the Honcho API in batches of 100 and recorded in the change journal. This cannot be undone."
+        warning={bulkIds.length > pageData.items.length ? "The selection includes matching memories that are not loaded on screen." : undefined}
+        count={bulkIds.length}
+        previews={bulkPreviews(bulkIds)}
+        run={runMemoryBulk(bulkIds)}
+        onClose={(result) => void finishMemoryBulk(result)}
+      /> : null}
+      {selected || showNew ? <MemoryEditor workspace={workspace} peers={peerOptionItems} selected={selected} onClose={() => { setSelected(null); setShowNew(false); }} onSaved={() => { setSelected(null); setShowNew(false); void load(1, query, level, { observer_id: browseObserver || undefined, observed_id: browseObserved || undefined, session_id: browseSession || undefined, contains: browseContains || undefined }); onChanged(); }} onOpenSession={onOpenSession} /> : null}
     </div>
   );
 }
@@ -1226,7 +1327,7 @@ function MemoryEditor({ workspace, peers, selected, onClose, onSaved, onOpenSess
   );
 }
 
-function PeersView({ workspace, initialPage }: { workspace: string; initialPage: PeerPagePayload }) {
+function PeersView({ workspace, initialPage, onChanged }: { workspace: string; initialPage: PeerPagePayload; onChanged?: () => void }) {
   const [observer, setObserver] = useState(initialPage.items[0]?.id ?? "");
   const [target, setTarget] = useState("");
   const [peerOptions, setPeerOptions] = useState<PeerOptions>(() => ({ items: initialPage.items, total: initialPage.total, page: initialPage.page, size: initialPage.size, pages: initialPage.pages }));
@@ -1337,7 +1438,8 @@ function PeersView({ workspace, initialPage }: { workspace: string; initialPage:
 
   return (
     <div className="page-grid">
-      <section className="section-intro"><div><span className="eyebrow">PEERS / {pageData.total.toLocaleString()} TOTAL</span><h2>Peer context</h2><p>Inspect the representation and peer card Honcho maintains for a relationship.</p></div><div className="context-pill"><Network size={15} aria-hidden="true" /> Observer perspective</div></section>
+      <section className="section-intro"><div><span className="eyebrow">PEERS / {pageData.total.toLocaleString()} TOTAL</span><h2>Peer context</h2><p>Purge a peer&apos;s memory, or inspect the representation and peer card Honcho maintains for a relationship.</p></div><div className="context-pill"><Network size={15} aria-hidden="true" /> Observer perspective</div></section>
+      <PeerManagementPanel workspace={workspace} peers={peerOptionItems} onPurged={() => { void loadContext(); onChanged?.(); }} />
       <section className="peer-layout">
         <div className="panel peer-selector-panel">
           <div className="panel-heading"><div><span className="eyebrow">RELATIONSHIP</span><h2>Choose perspective</h2></div><UserRound size={19} aria-hidden="true" /></div>
@@ -1366,7 +1468,137 @@ function PeersView({ workspace, initialPage }: { workspace: string; initialPage:
   );
 }
 
-function SessionsView({ workspace, initialPage, focus }: { workspace: string; initialPage: SessionPagePayload; focus: { nonce: number; sessionId: string } }) {
+const MAX_CARD_CLEAR_PEERS = 100;
+const MAX_COUNTED_PEERS = 50;
+
+function PeerManagementPanel({ workspace, peers, onPurged }: { workspace: string; peers: Peer[]; onPurged: () => void }) {
+  const [filter, setFilter] = useState("");
+  const selection = useSelection();
+  const [purgeIds, setPurgeIds] = useState<string[] | null>(null);
+  const [counts, setCounts] = useState<Record<string, { observer: number; observed: number } | null>>({});
+  const [countGeneration, setCountGeneration] = useState(0);
+  const listed = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    return needle ? peers.filter((peer) => peer.id.toLowerCase().includes(needle)) : peers;
+  }, [filter, peers]);
+  const listedIds = useMemo(() => listed.map((peer) => peer.id), [listed]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const memoriesUrl = (key: "observer_id" | "observed_id", peerId: string) => `/api/${encodeURIComponent(workspace)}/memories?page=1&size=1&${key}=${encodeURIComponent(peerId)}`;
+    const targets = listed.slice(0, MAX_COUNTED_PEERS);
+    void Promise.all(targets.map(async (peer) => {
+      try {
+        const [asObserver, asObserved] = await Promise.all([
+          requestJson<ConclusionPage>(memoriesUrl("observer_id", peer.id), { signal: controller.signal }),
+          requestJson<ConclusionPage>(memoriesUrl("observed_id", peer.id), { signal: controller.signal }),
+        ]);
+        return [peer.id, { observer: asObserver.total, observed: asObserved.total }] as const;
+      } catch {
+        return [peer.id, null] as const;
+      }
+    })).then((entries) => {
+      if (!controller.signal.aborted) setCounts(Object.fromEntries(entries));
+    });
+    return () => controller.abort();
+  }, [listed, workspace, countGeneration]);
+
+  const runPurge = (peerIds: string[]) => async (context: BulkRunContext): Promise<ChunkedDeleteResult> => {
+    const base = `/api/${encodeURIComponent(workspace)}`;
+    const collected = new Set<string>();
+    let truncated = false;
+    for (let index = 0; index < peerIds.length; index += 1) {
+      const peerId = peerIds[index]!;
+      context.onProgress(index, peerIds.length, `Collecting conclusions for ${peerId}`);
+      for (const key of ["observer_id", "observed_id"] as const) {
+        const payload = await requestJson<{ ids: string[]; total: number; truncated: boolean }>(`${base}/memories/ids?${key}=${encodeURIComponent(peerId)}`);
+        payload.ids.forEach((id) => collected.add(id));
+        truncated ||= payload.truncated;
+      }
+      if (context.shouldStop()) return { deleted: [], failed: [], remaining: [...collected], stopped: true };
+    }
+    const ids = [...collected];
+    const result = ids.length
+      ? await runChunkedBulkDelete({ url: `${base}/memories/bulk-delete`, ids, onProgress: (done, total) => context.onProgress(done, total, "Deleting conclusions"), shouldStop: context.shouldStop })
+      : { deleted: [], failed: [], remaining: [], stopped: false } as ChunkedDeleteResult;
+    if (result.stopped || result.error) return result;
+    const cardErrors: string[] = [];
+    const observers = peers.slice(0, MAX_CARD_CLEAR_PEERS);
+    for (const peerId of peerIds) {
+      context.onProgress(ids.length, ids.length, `Clearing peer cards for ${peerId}`);
+      const cardUrls = [`${base}/peers/${encodeURIComponent(peerId)}/card`, ...observers.filter((peer) => peer.id !== peerId).map((peer) => `${base}/peers/${encodeURIComponent(peer.id)}/card?target=${encodeURIComponent(peerId)}`)];
+      for (const url of cardUrls) {
+        try {
+          await requestJson(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ facts: [] }) });
+        } catch (cardError) {
+          cardErrors.push(`${url.replace(base, "")}: ${cardError instanceof Error ? cardError.message : "failed"}`);
+        }
+      }
+    }
+    const notes = [
+      truncated ? "Some peers had more conclusions than the 20,000-id selection cap; run purge again to continue." : "",
+      cardErrors.length ? `${cardErrors.length} peer card clear(s) failed: ${cardErrors.slice(0, 3).join("; ")}` : "",
+    ].filter(Boolean);
+    return { ...result, ...(notes.length ? { error: notes.join(" ") } : {}) };
+  };
+
+  const finishPurge = (result: ChunkedDeleteResult | null) => {
+    setPurgeIds(null);
+    if (!result) return;
+    if (!result.stopped && !result.error) selection.clear();
+    setCountGeneration((generation) => generation + 1);
+    onPurged();
+  };
+
+  return (
+    <section className="panel peer-manage-panel">
+      <div className="panel-heading"><div><span className="eyebrow">MANAGE PEERS</span><h2>Purge peer memory</h2></div><UsersRound size={18} aria-hidden="true" /></div>
+      <p className="panel-help">Honcho has no peer-delete API. Purging deletes every conclusion where the peer is the observer or the observed, then clears its peer cards. The peer id, sessions, and messages remain; delete sessions in the Session archive.</p>
+      <div className="session-search peer-search">
+        <Search size={14} aria-hidden="true" />
+        <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Search peers…" aria-label="Search peers by id" maxLength={512} />
+      </div>
+      {listed.length ? <SelectionBar
+        visibleIds={listedIds}
+        selected={selection.selected}
+        onToggleAll={() => selection.toggleAll(listedIds)}
+        masterLabel="Select all listed peers"
+        onClear={selection.clear}
+        onDelete={() => setPurgeIds([...selection.selected])}
+        deleteLabel="Purge selected"
+      /> : <span className="muted journal-empty">No peers match this search.</span>}
+      <div className="peer-manage-list">
+        {listed.map((peer) => {
+          const count = counts[peer.id];
+          return (
+            <label className={`peer-manage-row ${selection.selected.has(peer.id) ? "peer-manage-checked" : ""}`} key={peer.id}>
+              <RowCheckbox checked={selection.selected.has(peer.id)} onToggle={() => selection.toggle(peer.id)} label={`Select peer ${peer.id}`} />
+              <span className="avatar">{peer.id.slice(0, 1).toUpperCase()}</span>
+              <span className="peer-manage-copy"><strong className="mono">{peer.id}</strong><small>{formatDate(peer.created_at)}</small></span>
+              <span className="mono peer-manage-count">{count === undefined ? "…" : count === null ? "count unavailable" : `${count.observer.toLocaleString()} as observer · ${count.observed.toLocaleString()} as observed`}</span>
+            </label>
+          );
+        })}
+      </div>
+      {purgeIds ? <BulkDeleteDialog
+        title={`Purge memory for ${purgeIds.length} ${purgeIds.length === 1 ? "peer" : "peers"}`}
+        description="Deletes every conclusion where these peers are observer or observed (in batches of 100, journaled), then replaces their own peer cards and other peers' cards about them with an empty card. This cannot be undone."
+        warning="The peer ids, sessions, and messages are not deleted. Honcho may derive new conclusions if the deriver processes their messages again."
+        count={purgeIds.length}
+        previews={purgeIds.map((peerId) => {
+          const count = counts[peerId];
+          return count ? `${peerId}: ${count.observer.toLocaleString()} as observer, ${count.observed.toLocaleString()} as observed` : peerId;
+        })}
+        confirmWord="PURGE"
+        actionVerb="Purge"
+        run={runPurge(purgeIds)}
+        onClose={finishPurge}
+      /> : null}
+    </section>
+  );
+}
+
+function SessionsView({ workspace, initialPage, focus, onChanged }: { workspace: string; initialPage: SessionPagePayload; focus: { nonce: number; sessionId: string }; onChanged?: () => void }) {
   const sessions = initialPage.items;
   const { nonce: focusNonce, sessionId: focusSessionId } = focus;
   const [selected, setSelected] = useState<Session | null>(null);
@@ -1381,17 +1613,35 @@ function SessionsView({ workspace, initialPage, focus }: { workspace: string; in
   const sessionPageRequestRef = useRef(0);
   const messageRequestRef = useRef(0);
   const focusHandledRef = useRef("");
+  const [sessionSearchDraft, setSessionSearchDraft] = useState("");
+  const [sessionSearch, setSessionSearch] = useState("");
+  const sessionSelection = useSelection();
+  const [sessionBulkIds, setSessionBulkIds] = useState<string[] | null>(null);
+  const [selectingAllSessions, setSelectingAllSessions] = useState(false);
+  const [sessionSelectionNote, setSessionSelectionNote] = useState("");
 
-  const loadSessionsPage = async (nextPage: number) => {
+  const loadSessionsPage = async (nextPage: number, contains = sessionSearch) => {
     const requestId = ++sessionPageRequestRef.current;
     setRequestedPage(nextPage);
     setSessionPageLoading(true);
     setSessionPageError("");
     try {
-      const url = `/api/${encodeURIComponent(workspace)}/sessions?page=${nextPage}&size=50`;
+      const containsParam = contains ? `&contains=${encodeURIComponent(contains)}` : "";
+      const url = `/api/${encodeURIComponent(workspace)}/sessions?page=${nextPage}&size=50${containsParam}`;
       const nextPageData = await requestJson<SessionPagePayload>(url);
       if (requestId !== sessionPageRequestRef.current) return;
       setSessionPageData(nextPageData);
+      if (contains) {
+        // Never leave the detail pane (and its Delete button) on a session hidden by the active search.
+        setSelected((current) => {
+          if (current && !nextPageData.items.some((session) => session.id === current.id)) {
+            messageRequestRef.current += 1;
+            setMessages(null);
+            return null;
+          }
+          return current;
+        });
+      }
     } catch (pageLoadError) {
       if (requestId !== sessionPageRequestRef.current) return;
       setSessionPageError(pageLoadError instanceof Error ? pageLoadError.message : "Unable to load sessions.");
@@ -1419,8 +1669,10 @@ function SessionsView({ workspace, initialPage, focus }: { workspace: string; in
     }
   }, [workspace]);
 
+  const autoSelectedRef = useRef(false);
   useEffect(() => {
-    if (focusSessionId || !sessions[0] || selected) return;
+    if (autoSelectedRef.current || focusSessionId || !sessions[0] || selected) return;
+    autoSelectedRef.current = true;
     const timer = window.setTimeout(() => void loadMessages(sessions[0]), 0);
     return () => window.clearTimeout(timer);
   }, [focusSessionId, loadMessages, selected, sessions]);
@@ -1440,13 +1692,98 @@ function SessionsView({ workspace, initialPage, focus }: { workspace: string; in
     return () => window.clearTimeout(timer);
   }, [focusNonce, focusSessionId, loadMessages, sessionPageData.items, workspace]);
 
+  const applySessionSearch = (value = sessionSearchDraft) => {
+    const next = value.trim();
+    setSessionSearch(next);
+    sessionSelection.clear();
+    setSessionSelectionNote("");
+    void loadSessionsPage(1, next);
+  };
+
+  const visibleSessionIds = sessionPageData.items.map((session) => session.id);
+
+  const selectAllMatchingSessions = async () => {
+    setSelectingAllSessions(true);
+    setSessionSelectionNote("");
+    try {
+      const params = sessionSearch ? `?contains=${encodeURIComponent(sessionSearch)}` : "";
+      const payload = await requestJson<{ ids: string[]; total: number; truncated: boolean }>(`/api/${encodeURIComponent(workspace)}/sessions/ids${params}`);
+      sessionSelection.replace(payload.ids);
+      if (payload.truncated) setSessionSelectionNote(`Selection capped at ${payload.ids.length.toLocaleString()} of ${payload.total.toLocaleString()} matching.`);
+    } catch (selectError) {
+      setSessionSelectionNote(selectError instanceof Error ? selectError.message : "Unable to select every matching session.");
+    } finally {
+      setSelectingAllSessions(false);
+    }
+  };
+
+  const runSessionBulk = (ids: string[]) => (context: BulkRunContext) => runChunkedBulkDelete({
+    url: `/api/${encodeURIComponent(workspace)}/sessions/bulk-delete`,
+    ids,
+    onProgress: (done, total) => context.onProgress(done, total, "Deleting sessions"),
+    shouldStop: context.shouldStop,
+  });
+
+  const finishSessionBulk = async (result: ChunkedDeleteResult | null) => {
+    setSessionBulkIds(null);
+    if (!result || (result.deleted.length === 0 && result.failed.length === 0)) return;
+    const deleted = new Set(result.deleted);
+    sessionSelection.replace([...result.failed.map((failure) => failure.id), ...result.remaining]);
+    if (selected && deleted.has(selected.id)) {
+      messageRequestRef.current += 1;
+      setSelected(null);
+      setMessages(null);
+    }
+    await loadSessionsPage(1);
+    if (result.deleted.length) onChanged?.();
+  };
+
   return (
     <div className="page-grid">
-      <section className="section-intro"><div><span className="eyebrow">SESSIONS / {sessionPageData.total.toLocaleString()} TOTAL</span><h2>Session archive</h2><p>Inspect conversation history without mutating messages.</p></div><div className="context-pill"><Archive size={15} aria-hidden="true" /> Immutable history view</div></section>
+      <section className="section-intro"><div><span className="eyebrow">SESSIONS / {sessionPageData.total.toLocaleString()} TOTAL</span><h2>Session archive</h2><p>Search, inspect, and delete conversation history. Deleting a session removes all of its messages.</p></div><div className="context-pill"><Archive size={15} aria-hidden="true" /> Deletion is permanent</div></section>
       <section className="session-layout">
-        <div className="panel session-list-panel"><div className="panel-heading"><div><span className="eyebrow">RECENT SESSIONS</span><h2>{sessionPageData.total.toLocaleString()} total</h2></div><MessageSquareText size={18} aria-hidden="true" /></div>{sessionPageError ? <ErrorBanner message={sessionPageError} onRetry={() => void loadSessionsPage(requestedPage)} /> : null}<div className="session-list">{sessionPageData.items.map((session) => <button className={`session-list-row ${selected?.id === session.id ? "session-selected" : ""}`} type="button" key={session.id} onClick={() => void loadMessages(session)}><span className={`session-pip ${session.is_active ? "session-live" : ""}`} /><span className="session-list-copy"><strong>{compactId(session.id, 26)}</strong><small>{formatDate(session.created_at)}</small></span><span className="mono">{session.is_active ? "LIVE" : "CLOSED"}</span></button>)}{!sessionPageData.items.length ? <EmptyState icon={<MessageSquareText size={20} />} title="No sessions" body="No sessions were returned for this workspace." /> : null}</div><Pagination page={sessionPageData.page} pages={sessionPageData.pages} disabled={sessionPageLoading} onPage={(next) => void loadSessionsPage(next)} /></div>
-        <div className="panel messages-panel"><div className="panel-heading"><div><span className="eyebrow">MESSAGE STREAM</span><h2>{selected ? compactId(selected.id, 28) : "Select a session"}</h2></div>{selected ? <span className={`state-badge ${selected.is_active ? "state-active" : ""}`}>{selected.is_active ? "Active" : "Closed"}</span> : null}</div>{selected ? <SessionSummaryPanelWrapper workspace={workspace} sessionId={selected.id} /> : null}{error ? <ErrorBanner message={error} onRetry={() => { if (selected) void loadMessages(selected, messagePage); }} /> : null}{loading ? <LoadingRows count={5} /> : messages?.items.length ? <><div className="message-stream">{messages.items.map((message) => <MessageRow key={message.id} message={message} />)}</div><Pagination page={messages.page} pages={messages.pages} onPage={(page) => { if (selected) void loadMessages(selected, page); }} /></> : <EmptyState icon={<MessageSquareText size={21} />} title="No messages in view" body={selected ? "This session has no messages on the selected page." : "Choose a session to inspect its message stream."} />}</div>
+        <div className="panel session-list-panel">
+          <div className="panel-heading"><div><span className="eyebrow">{sessionSearch ? "MATCHING SESSIONS" : "RECENT SESSIONS"}</span><h2>{sessionPageData.total.toLocaleString()} total</h2></div><MessageSquareText size={18} aria-hidden="true" /></div>
+          <div className="session-search">
+            <Search size={14} aria-hidden="true" />
+            <input value={sessionSearchDraft} onChange={(event) => setSessionSearchDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applySessionSearch(); }} placeholder="Search session ids…" aria-label="Search sessions by id" maxLength={500} />
+            {sessionSearch ? <button className="text-button" type="button" onClick={() => { setSessionSearchDraft(""); applySessionSearch(""); }} aria-label="Clear session search"><X size={13} aria-hidden="true" /></button> : null}
+          </div>
+          {sessionPageData.items.length ? <SelectionBar
+            visibleIds={visibleSessionIds}
+            selected={sessionSelection.selected}
+            onToggleAll={() => sessionSelection.toggleAll(visibleSessionIds)}
+            masterLabel="Select all sessions on this page"
+            onClear={() => { sessionSelection.clear(); setSessionSelectionNote(""); }}
+            onDelete={() => setSessionBulkIds([...sessionSelection.selected])}
+            matchingTotal={sessionPageData.total}
+            onSelectAllMatching={() => void selectAllMatchingSessions()}
+            selectingAll={selectingAllSessions}
+            note={sessionSelectionNote || undefined}
+          /> : null}
+          {sessionPageError ? <ErrorBanner message={sessionPageError} onRetry={() => void loadSessionsPage(requestedPage)} /> : null}
+          <div className="session-list">
+            {sessionPageData.items.map((session) => (
+              <div className={`session-list-item ${selected?.id === session.id ? "session-selected" : ""} ${sessionSelection.selected.has(session.id) ? "session-checked" : ""}`} key={session.id}>
+                <RowCheckbox checked={sessionSelection.selected.has(session.id)} onToggle={() => sessionSelection.toggle(session.id)} label={`Select session ${session.id}`} />
+                <button className="session-list-row" type="button" onClick={() => void loadMessages(session)}><span className={`session-pip ${session.is_active ? "session-live" : ""}`} /><span className="session-list-copy"><strong>{compactId(session.id, 26)}</strong><small>{formatDate(session.created_at)}</small></span><span className="mono">{session.is_active ? "LIVE" : "CLOSED"}</span></button>
+              </div>
+            ))}
+            {!sessionPageData.items.length ? <EmptyState icon={<MessageSquareText size={20} />} title="No sessions" body={sessionSearch ? "No session ids match this search." : "No sessions were returned for this workspace."} /> : null}
+          </div>
+          <Pagination page={sessionPageData.page} pages={sessionPageData.pages} disabled={sessionPageLoading} onPage={(next) => void loadSessionsPage(next)} />
+        </div>
+        <div className="panel messages-panel"><div className="panel-heading"><div><span className="eyebrow">MESSAGE STREAM</span><h2>{selected ? compactId(selected.id, 28) : "Select a session"}</h2></div>{selected ? <div className="panel-heading-actions"><span className={`state-badge ${selected.is_active ? "state-active" : ""}`}>{selected.is_active ? "Active" : "Closed"}</span><button className="button button-danger-ghost button-small" type="button" onClick={() => setSessionBulkIds([selected.id])}><Trash2 size={13} aria-hidden="true" /> Delete session</button></div> : null}</div>{selected ? <SessionSummaryPanelWrapper workspace={workspace} sessionId={selected.id} /> : null}{error ? <ErrorBanner message={error} onRetry={() => { if (selected) void loadMessages(selected, messagePage); }} /> : null}{loading ? <LoadingRows count={5} /> : messages?.items.length ? <><div className="message-stream">{messages.items.map((message) => <MessageRow key={message.id} message={message} />)}</div><Pagination page={messages.page} pages={messages.pages} onPage={(page) => { if (selected) void loadMessages(selected, page); }} /></> : <EmptyState icon={<MessageSquareText size={21} />} title="No messages in view" body={selected ? "This session has no messages on the selected page." : "Choose a session to inspect its message stream."} />}</div>
       </section>
+      {sessionBulkIds ? <BulkDeleteDialog
+        title={`Delete ${sessionBulkIds.length.toLocaleString()} ${sessionBulkIds.length === 1 ? "session" : "sessions"}`}
+        description="Honcho marks each session inactive immediately and removes its messages asynchronously. Each deletion is recorded in the change journal. This cannot be undone."
+        warning="Honcho also deletes conclusions stored against these session ids. Peer cards and conclusions stored without a session id are not affected."
+        count={sessionBulkIds.length}
+        previews={sessionBulkIds.slice(0, 6)}
+        run={runSessionBulk(sessionBulkIds)}
+        onClose={(result) => void finishSessionBulk(result)}
+      /> : null}
     </div>
   );
 }

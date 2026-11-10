@@ -2,6 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Layers, Link2, LoaderCircle, RefreshCw, Sparkles, Trash2, Webhook } from "lucide-react";
 
 import type { SessionContext as SessionContextPayload, ScopeStatus, WebhookEndpoint } from "@/lib/honcho-client";
+import type { ChunkedDeleteResult } from "@/lib/bulk-client";
+
+import { BulkDeleteDialog, RowCheckbox, SelectionBar, useSelection, type BulkRunContext } from "./bulk-controls";
 
 const LEVEL_COLORS: Record<string, string> = {
   explicit: "var(--accent-mint)",
@@ -416,6 +419,9 @@ export function WebhooksView({ workspace }: { workspace: string }) {
   const [webhooks, setWebhooks] = useState<WebhookEndpoint[] | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [generation, setGeneration] = useState(0);
+  const selection = useSelection();
+  const [deleteIds, setDeleteIds] = useState<string[] | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -429,27 +435,68 @@ export function WebhooksView({ workspace }: { workspace: string }) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [workspace]);
+  }, [workspace, generation]);
+
+  const visibleIds = webhooks?.map((webhook) => webhook.id) ?? [];
+
+  const runDelete = (ids: string[]) => async (context: BulkRunContext): Promise<ChunkedDeleteResult> => {
+    const result: ChunkedDeleteResult = { deleted: [], failed: [], remaining: [], stopped: false };
+    for (let index = 0; index < ids.length; index += 1) {
+      if (index > 0 && context.shouldStop()) return { ...result, stopped: true, remaining: ids.slice(index) };
+      const id = ids[index]!;
+      const response = await fetch(`/api/${encodeURIComponent(workspace)}/webhooks/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
+      if (response?.ok) result.deleted.push(id);
+      else {
+        const payload = (await response?.json().catch(() => ({}))) as { error?: string } | undefined;
+        result.failed.push({ id, error: payload?.error ?? `Request failed${response ? ` with HTTP ${response.status}` : ""}.` });
+      }
+      context.onProgress(index + 1, ids.length, "Deleting webhooks");
+    }
+    return result;
+  };
+
+  const finishDelete = (result: ChunkedDeleteResult | null) => {
+    setDeleteIds(null);
+    if (!result || (result.deleted.length === 0 && result.failed.length === 0)) return;
+    selection.replace([...result.failed.map((failure) => failure.id), ...result.remaining]);
+    setGeneration((value) => value + 1);
+  };
 
   return (
     <div className="page-grid">
-      {panelIntro("Webhooks", "WEBHOOKS / OUTBOUND", "Endpoints this Honcho instance calls on queue activity. Read-only audit view; creating, testing, or deleting endpoints is not exposed by this console.")}
+      {panelIntro("Webhooks", "WEBHOOKS / OUTBOUND", "Endpoints this Honcho instance calls on queue activity. Select endpoints to delete them; creating or testing endpoints is not exposed by this console.")}
       {error ? <span className="muted journal-empty">{error}</span> : null}
       <section className="panel">
         <div className="panel-heading"><div><span className="eyebrow">ENDPOINTS</span><h2>{webhooks?.length ?? 0} configured</h2></div><Webhook size={18} aria-hidden="true" /></div>
         {loading && !webhooks && !error ? <span className="muted journal-empty">Loading webhooks…</span> : null}
+        {webhooks && webhooks.length > 0 ? <SelectionBar
+          visibleIds={visibleIds}
+          selected={selection.selected}
+          onToggleAll={() => selection.toggleAll(visibleIds)}
+          masterLabel="Select all webhooks"
+          onClear={selection.clear}
+          onDelete={() => setDeleteIds([...selection.selected])}
+        /> : null}
         <div className="mini-session-list">
           {webhooks?.map((webhook) => (
-            <div className="mini-session" key={webhook.id}>
-              <span className="session-pip session-live" />
+            <div className={`mini-session webhook-row ${selection.selected.has(webhook.id) ? "webhook-checked" : ""}`} key={webhook.id}>
+              <RowCheckbox checked={selection.selected.has(webhook.id)} onToggle={() => selection.toggle(webhook.id)} label={`Select webhook ${webhook.id}`} />
               <div><strong className="mono">{webhook.id}</strong><span className="mono-wrap">{webhook.url}</span></div>
               <span>{formatDate(webhook.created_at)}</span>
             </div>
           ))}
           {webhooks && webhooks.length === 0 ? <span className="muted journal-empty">No webhook endpoints are configured for this workspace.</span> : null}
         </div>
-        <p className="panel-help"><Sparkles size={13} aria-hidden="true" /> Read-only: credentials and signed payloads are never fetched or rendered by this console.</p>
+        <p className="panel-help"><Sparkles size={13} aria-hidden="true" /> Credentials and signed payloads are never fetched or rendered by this console.</p>
       </section>
+      {deleteIds ? <BulkDeleteDialog
+        title={`Delete ${deleteIds.length} webhook ${deleteIds.length === 1 ? "endpoint" : "endpoints"}`}
+        description="Honcho stops calling these URLs immediately. Each deletion is recorded in the change journal. This cannot be undone."
+        count={deleteIds.length}
+        previews={deleteIds.map((id) => webhooks?.find((webhook) => webhook.id === id)?.url ?? id)}
+        run={runDelete(deleteIds)}
+        onClose={finishDelete}
+      /> : null}
     </div>
   );
 }

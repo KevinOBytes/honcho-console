@@ -161,7 +161,24 @@ export type ConclusionFilters = {
   observed_id?: string;
   session_id?: string;
   level?: Conclusion["level"];
+  /** Case-insensitive substring match on conclusion content (Honcho `icontains`). */
+  contains?: string;
 };
+
+export type SessionFilters = {
+  /** Case-insensitive substring match on the session id (Honcho `icontains`). */
+  id_contains?: string;
+};
+
+export const MAX_TEXT_FILTER_LENGTH = 500;
+
+function boundedTextFilter(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_TEXT_FILTER_LENGTH) {
+    throw new Error(`Text filter must be between 1 and ${MAX_TEXT_FILTER_LENGTH} characters.`);
+  }
+  return trimmed;
+}
 
 export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "max"] as const;
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
@@ -267,12 +284,36 @@ export class HonchoClient {
     );
   }
 
-  async listSessions(workspace: string, page = 1, size = 50): Promise<SessionPage> {
+  async listSessions(workspace: string, page = 1, size = 50, filters?: SessionFilters): Promise<SessionPage> {
+    const body = filters?.id_contains !== undefined
+      ? { filters: { id: { icontains: boundedTextFilter(filters.id_contains) } } }
+      : {};
     return this.request(
       `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/sessions/list?${pageParams(page, size)}`,
       "POST",
-      {},
+      body,
       sessionPageSchema,
+    );
+  }
+
+  async deleteSession(workspace: string, sessionId: string): Promise<void> {
+    const session = validateSessionId(sessionId);
+    // Honcho answers 202 Accepted and finishes the deletion asynchronously via its queue.
+    await this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/sessions/${pathSegment(session)}`,
+      "DELETE",
+      undefined,
+      z.unknown(),
+    );
+  }
+
+  async deleteWebhook(workspace: string, endpointId: string): Promise<void> {
+    const endpoint = parseResourceId(endpointId, "webhook");
+    await this.request(
+      `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/webhooks/${pathSegment(endpoint)}`,
+      "DELETE",
+      undefined,
+      z.unknown(),
     );
   }
 
@@ -281,10 +322,13 @@ export class HonchoClient {
     options: { page?: number; size?: number; filters?: ConclusionFilters } = {},
   ): Promise<ConclusionPage> {
     const { page = 1, size = 50, filters = {} } = options;
+    const { contains, ...columnFilters } = filters;
+    const upstreamFilters: Record<string, unknown> = { ...columnFilters };
+    if (contains !== undefined) upstreamFilters.content = { icontains: boundedTextFilter(contains) };
     return this.request(
       `/v3/workspaces/${pathSegment(parseWorkspaceId(workspace))}/conclusions/list?${pageParams(page, size)}`,
       "POST",
-      { filters },
+      { filters: upstreamFilters },
       conclusionPageSchema,
     );
   }
@@ -694,7 +738,9 @@ export class HonchoClient {
       return response as z.infer<T>;
     }
 
-    if (response.status === 204) {
+    if (response.status === 204 || (response.status === 202 && method === "DELETE")) {
+      // Drain/cancel the body so the keep-alive socket is released.
+      await response.body?.cancel().catch(() => undefined);
       return undefined as z.infer<T>;
     }
 

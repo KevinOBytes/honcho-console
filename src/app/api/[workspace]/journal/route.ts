@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { parseWorkspaceId } from "@/lib/honcho-client";
 import { readChangesFiltered, type ChangeJournalAction } from "@/lib/change-journal";
 
-const ACTIONS: ChangeJournalAction[] = ["create", "replace", "delete", "card-update", "dream"];
+const ACTIONS: ChangeJournalAction[] = ["create", "replace", "delete", "card-update", "dream", "session-delete", "webhook-delete"];
 
 function parseLimit(value: string | null): number {
   if (value === null) return 100;
